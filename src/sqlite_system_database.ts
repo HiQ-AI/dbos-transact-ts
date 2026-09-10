@@ -220,6 +220,8 @@ export class SQLitePool {
       database.exec('PRAGMA busy_timeout = 30000');
       database.exec('PRAGMA foreign_keys = ON');
       database.exec('PRAGMA journal_mode = WAL');
+      // Durable checkpoints must not inherit weaker host SQLite build defaults.
+      database.exec('PRAGMA synchronous = FULL');
       this.database = database;
       return database;
     } catch (error) {

@@ -3581,7 +3581,7 @@ export class SystemDatabase {
         const scope = this.#appNameFilter('application_name', this.appName, params);
         const partitionFilter = partitionScoped ? `AND queue_partition_key = $${params.push(queuePartitionKey)}` : '';
         const { rows } = await client.query<{ count: string }>(
-          `SELECT COUNT(*) FROM "${this.schemaName}".workflow_status
+          `SELECT COUNT(*) AS count FROM "${this.schemaName}".workflow_status
            WHERE queue_name = $1 AND status = $2 AND ${scope} ${partitionFilter}`,
           params,
         );

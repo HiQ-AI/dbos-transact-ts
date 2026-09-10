@@ -275,8 +275,9 @@ describe('running-admin-server-tests', () => {
     const steps: step_info[] = await response.json();
     expect(steps.length).toBe(3);
     expect(steps[0].function_name).toBe('stepOne');
-    expect(Number(steps[0].started_at_epoch_ms)).toBeGreaterThan(startTime);
-    expect(Number(steps[0].completed_at_epoch_ms)).toBeGreaterThan(Number(steps[0].started_at_epoch_ms));
+    // Millisecond timestamps may tie for a fast step; ordering does not imply positive elapsed time.
+    expect(Number(steps[0].started_at_epoch_ms)).toBeGreaterThanOrEqual(startTime);
+    expect(Number(steps[0].completed_at_epoch_ms)).toBeGreaterThanOrEqual(Number(steps[0].started_at_epoch_ms));
     expect(steps[0].function_name).toBe('stepOne');
     expect(steps[1].function_name).toBe('DBOS.sleep');
     expect(steps[2].function_name).toBe('stepTwo');

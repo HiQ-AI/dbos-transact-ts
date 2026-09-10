@@ -85,6 +85,18 @@ describeNativeSQLite('SQLite system database', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  test('uses WAL and FULL synchronization on every file database open', async () => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const pool = new SQLitePool(getConfiguredSystemDatabaseUrl(config));
+      try {
+        expect((await pool.query('PRAGMA journal_mode')).rows).toEqual([{ journal_mode: 'wal' }]);
+        expect((await pool.query('PRAGMA synchronous')).rows).toEqual([{ synchronous: 2 }]);
+      } finally {
+        await pool.end();
+      }
+    }
+  });
+
   test('serializes logical clients on one SQLite connection', async () => {
     const pool = new SQLitePool('sqlite:///:memory:');
     try {

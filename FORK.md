@@ -33,7 +33,8 @@ Local evidence on 2026-09-10:
 - SQLite: 21 dedicated tests plus 293 tests across core workflows, management, client, application scoping, recovery, patching, streams, serialization, outcome ownership, batch enqueue, attributes and versions pass. Backend-specific skips are retained; this is not the complete upstream suite.
 - PostgreSQL: targeted workflow, queue, client and management suites pass after fixing a timestamp-tie-dependent pagination fixture. No production timestamp changes or artificial delays are used.
 - Electron 40.8.5 / Node 24.14.0, run as a separate test process, loads `node:sqlite` and completes a real SDK workflow. This does not verify a packaged desktop application or Windows.
-- CI matrix is pending. Do not mark the candidate release-ready until applicable checks pass.
+- The first CI matrix passed PostgreSQL on Node 20/22/24 and package tests, but failed SQLite. Follow-up fixes add an explicit COUNT alias for queue admission, correct PostgreSQL application-database URLs in mixed-backend tests, and allow equal millisecond timestamps. Targeted SQLite 21/21 and PostgreSQL 22/22 checks pass; the new full CI matrix is pending.
+- File connections explicitly set WAL and synchronous=FULL rather than inheriting host SQLite compile defaults. Reopen tests verify both settings; this is not a simulated power-loss test.
 
 Upstream namespace publication is disabled for forks. Consume only an immutable verified downstream artifact, not an unbuilt branch or a mutable replacement for the upstream npm package. No automatic desktop release is authorized by this integration.
 

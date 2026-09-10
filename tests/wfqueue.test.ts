@@ -3871,58 +3871,63 @@ describe('limiter-dequeue-locking', () => {
 
   async function pendingCount(queueName: string): Promise<number> {
     const { rows } = await sysdb.pool.query<{ count: string }>(
-      `SELECT COUNT(*) FROM "${sysdb.schemaName}".workflow_status WHERE queue_name = $1 AND status = $2`,
+      `SELECT COUNT(*) AS count FROM "${sysdb.schemaName}".workflow_status WHERE queue_name = $1 AND status = $2`,
       [queueName, StatusString.PENDING],
     );
     return Number(rows[0].count);
   }
 
-  test('a peer mid-claim blocks a rate-limited dequeue rather than being skipped past', async () => {
-    const limit = 2;
-    const queueName = `limiter-lock-${randomUUID()}`;
-    const queue = await DBOS.registerQueue(queueName, {
-      rateLimit: { limitPerPeriod: limit, periodSec: 60 },
-      onConflict: 'always_update',
-    });
+  // This assertion exercises PostgreSQL row locks and SQLSTATE 55P03, not SQLite's database-wide write lock.
+  (usingSQLite() ? test.skip : test)(
+    'a peer mid-claim blocks a rate-limited dequeue rather than being skipped past',
+    async () => {
+      const limit = 2;
+      const queueName = `limiter-lock-${randomUUID()}`;
+      const queue = await DBOS.registerQueue(queueName, {
+        rateLimit: { limitPerPeriod: limit, periodSec: 60 },
+        onConflict: 'always_update',
+      });
 
-    // Distinct priorities so the head of the queue is deterministic.
-    const ids: string[] = [];
-    for (let priority = 1; priority <= limit * 2; priority++) {
-      const handle = await DBOS.startWorkflow(limitedWorkflow, {
-        queueName,
-        enqueueOptions: { priority },
-      })(`w${priority}`);
-      ids.push(handle.workflowID);
-    }
+      // Distinct priorities so the head of the queue is deterministic.
+      const ids: string[] = [];
+      for (let priority = 1; priority <= limit * 2; priority++) {
+        const handle = await DBOS.startWorkflow(limitedWorkflow, {
+          queueName,
+          enqueueOptions: { priority },
+        })(`w${priority}`);
+        ids.push(handle.workflowID);
+      }
 
-    const peer = new Client({ connectionString: config.systemDatabaseUrl });
-    await peer.connect();
-    try {
-      await peer.query('BEGIN');
-      // A peer dequeuer holding an open claim on the whole limiter budget.
-      const head = await peer.query<{ workflow_uuid: string }>(
-        `SELECT workflow_uuid FROM "${sysdb.schemaName}".workflow_status
+      const peer = new Client({ connectionString: config.systemDatabaseUrl });
+      await peer.connect();
+      try {
+        await peer.query('BEGIN');
+        // A peer dequeuer holding an open claim on the whole limiter budget.
+        const head = await peer.query<{ workflow_uuid: string }>(
+          `SELECT workflow_uuid FROM "${sysdb.schemaName}".workflow_status
          WHERE queue_name = $1 AND status = $2
          ORDER BY priority ASC, created_at ASC
          LIMIT ${limit} FOR UPDATE`,
-        [queueName, StatusString.ENQUEUED],
-      );
-      expect(head.rows.map((row) => row.workflow_uuid)).toEqual(ids.slice(0, limit));
+          [queueName, StatusString.ENQUEUED],
+        );
+        expect(head.rows.map((row) => row.workflow_uuid)).toEqual(ids.slice(0, limit));
 
-      // Under SKIP LOCKED this claims the rows behind the peer, spending the same budget a second time.
-      await expect(
-        sysdb.findAndMarkStartableWorkflows(queue, 'lock-test', globalParams.appVersion, undefined),
-      ).rejects.toMatchObject({ code: '55P03' });
+        // Under SKIP LOCKED this claims the rows behind the peer, spending the same budget a second time.
+        await expect(
+          sysdb.findAndMarkStartableWorkflows(queue, 'lock-test', globalParams.appVersion, undefined),
+        ).rejects.toMatchObject({ code: '55P03' });
 
-      // Nothing was admitted behind the peer's back.
-      for (const id of ids) {
-        expect((await sysdb.getWorkflowStatus(id))?.status).toBe(StatusString.ENQUEUED);
+        // Nothing was admitted behind the peer's back.
+        for (const id of ids) {
+          expect((await sysdb.getWorkflowStatus(id))?.status).toBe(StatusString.ENQUEUED);
+        }
+      } finally {
+        await peer.query('ROLLBACK');
+        await peer.end();
       }
-    } finally {
-      await peer.query('ROLLBACK');
-      await peer.end();
-    }
-  }, 30000);
+    },
+    30000,
+  );
 
   test.each([
     ['global-concurrency', { globalConcurrency: 1, partitionConcurrency: 1 }],

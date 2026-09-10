@@ -7,6 +7,7 @@ import assert from 'assert';
 import { maskDatabaseUrl } from './database_utils';
 import { DBOSJSON } from './serialization';
 import { validateObservabilityQueryTimeoutMs } from './system_database';
+import { isSQLiteSystemDatabaseUrl } from './sqlite_system_database';
 
 export const dbosConfigFilePath = 'dbos-config.yaml';
 
@@ -94,7 +95,18 @@ export function isValidDatabaseName(dbName: string): boolean {
 }
 
 export function getSystemDatabaseUrl(configFile: Pick<ConfigFile, 'name' | 'system_database_url'>): string {
-  const databaseUrl = configFile.system_database_url || defaultSysDatabaseUrl(configFile.name);
+  const databaseUrl =
+    configFile.system_database_url === undefined
+      ? defaultSysDatabaseUrl(configFile.name)
+      : configFile.system_database_url;
+
+  if (databaseUrl.trim() === '') {
+    throw new Error('Invalid system database URL: system_database_url must not be empty.');
+  }
+
+  if (isSQLiteSystemDatabaseUrl(databaseUrl)) {
+    return databaseUrl;
+  }
 
   const url = new URL(databaseUrl);
   const dbName = url.pathname.slice(1);
@@ -176,6 +188,9 @@ function toArray(endpoint: string | string[] | undefined): Array<string> {
 }
 
 export function translateDbosConfig(options: DBOSConfig, forceConsole: boolean = false): DBOSConfigInternal {
+  if (options.systemDatabasePool && options.systemDatabaseUrl && isSQLiteSystemDatabaseUrl(options.systemDatabaseUrl)) {
+    throw new Error('Custom systemDatabasePool is not supported for SQLite system databases');
+  }
   if (
     options.maxConcurrentQueueDispatches !== undefined &&
     (!Number.isInteger(options.maxConcurrentQueueDispatches) || options.maxConcurrentQueueDispatches <= 0)

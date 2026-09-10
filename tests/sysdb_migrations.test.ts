@@ -1,7 +1,7 @@
 import { Client } from 'pg';
 import { DBMigration, getCurrentSysDBVersion, runSysMigrationsPg } from '../src/sysdb_migrations/migration_runner';
 import { allMigrations, SHARED_MIGRATION_BASE } from '../src/sysdb_migrations/internal/migrations';
-import { generateDBOSTestConfig } from './helpers';
+import { generateDBOSTestConfig, usingSQLite } from './helpers';
 
 const TEST_SCHEMA = 'dbos_migration_test';
 
@@ -60,7 +60,7 @@ async function indexDefinition(client: Client, name: string): Promise<string | u
   return res.rows[0]?.indexdef;
 }
 
-describe('sysdb migration runner', () => {
+(usingSQLite() ? describe.skip : describe)('sysdb migration runner', () => {
   let client: Client;
 
   beforeAll(async () => {

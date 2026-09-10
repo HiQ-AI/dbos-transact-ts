@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Client } from 'pg';
+import { Pool } from 'pg';
 
 import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { context, SpanStatusCode, trace } from '@opentelemetry/api';
@@ -131,7 +131,7 @@ async function encodeError(message: string) {
 // Take the row away from the blocked run, standing in for the concurrent
 // resume/recovery/cancel that would do it in production.
 async function rewriteRowWith(
-  client: Client,
+  client: Pool,
   workflowID: string,
   status: (typeof StatusString)[keyof typeof StatusString],
   fields: { output?: string | null; error?: string | null; serialization?: string | null } = {},
@@ -156,7 +156,7 @@ async function rewriteRowWith(
  * the legacy column the rewrite also filled.
  */
 async function readOutcome(
-  client: Client,
+  client: Pool,
   workflowID: string,
 ): Promise<{ status: string; output: string | null; error: string | null }> {
   const { rows } = await client.query<{ status: string; output: string | null; error: string | null }>(
@@ -172,7 +172,7 @@ async function readOutcome(
 // Plant the checkpoint the blocked step is about to write, with a different
 // completion time so the step's own write is refused as a conflict. Stands in
 // for the concurrent execution that would have written it in production.
-async function plantConflictingCheckpoint(client: Client, workflowID: string, stepID: number | undefined) {
+async function plantConflictingCheckpoint(client: Pool, workflowID: string, stepID: number | undefined) {
   expect(stepID).toBeDefined();
   await client.query(
     `INSERT INTO dbos.operation_outputs
@@ -190,7 +190,7 @@ async function plantConflictingCheckpoint(client: Client, workflowID: string, st
 // outcome.
 describe('workflow-outcome-ownership', () => {
   let config: DBOSConfig;
-  let systemDBClient: Client;
+  let systemDBClient: Pool;
 
   beforeAll(async () => {
     config = generateDBOSTestConfig();
@@ -200,12 +200,10 @@ describe('workflow-outcome-ownership', () => {
 
   beforeEach(async () => {
     await DBOS.launch();
-    systemDBClient = new Client({ connectionString: config.systemDatabaseUrl });
-    await systemDBClient.connect();
+    systemDBClient = DBOSExecutor.globalInstance!.systemDatabase.pool;
   });
 
   afterEach(async () => {
-    await systemDBClient.end();
     await DBOS.shutdown();
   });
 
@@ -477,7 +475,7 @@ describe('workflow-outcome-ownership', () => {
 // parking.
 describe('workflow-outcome-ownership-spans', () => {
   let config: DBOSConfig;
-  let systemDBClient: Client;
+  let systemDBClient: Pool;
   const memoryExporter = new InMemorySpanExporter();
 
   beforeAll(() => {
@@ -500,12 +498,10 @@ describe('workflow-outcome-ownership-spans', () => {
   beforeEach(async () => {
     memoryExporter.reset();
     await DBOS.launch();
-    systemDBClient = new Client({ connectionString: config.systemDatabaseUrl });
-    await systemDBClient.connect();
+    systemDBClient = DBOSExecutor.globalInstance!.systemDatabase.pool;
   });
 
   afterEach(async () => {
-    await systemDBClient.end();
     await DBOS.shutdown();
   });
 

@@ -5,6 +5,8 @@ on:
 
 jobs:
   publish:
+    # A fork must never publish packages under DBOS's upstream namespace.
+    if: github.repository == 'dbos-inc/dbos-transact-ts'
     runs-on: ubuntu-latest
     permissions:
       contents: read

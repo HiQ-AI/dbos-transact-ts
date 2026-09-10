@@ -9,7 +9,7 @@ import {
   setWfAndChildrenToPending,
 } from './helpers';
 import { DBOSConfig, DBOSExecutor } from '../src/dbos-executor';
-import { Client } from 'pg';
+import { Pool } from 'pg';
 import { StatusString } from '../dist/src';
 import { DBOSAwaitedWorkflowExceededMaxRecoveryAttempts } from '../src/error';
 import { INTERNAL_QUEUE_NAME } from '../src/utils';
@@ -24,7 +24,7 @@ import { globalParams } from '../src/utils';
 
 describe('recovery-tests', () => {
   let config: DBOSConfig;
-  let systemDBClient: Client;
+  let systemDBClient: Pool;
   const queue = { name: 'DLQQ' };
 
   beforeAll(async () => {
@@ -37,14 +37,10 @@ describe('recovery-tests', () => {
     await DBOS.launch();
     await DBOS.registerQueue(queue.name, { onConflict: 'always_update', concurrency: 1 });
     process.env.DBOS__VMID = '';
-    systemDBClient = new Client({
-      connectionString: config.systemDatabaseUrl,
-    });
-    await systemDBClient.connect();
+    systemDBClient = DBOSExecutor.globalInstance!.systemDatabase.pool;
   });
 
   afterEach(async () => {
-    await systemDBClient.end();
     await DBOS.shutdown();
   });
 
@@ -417,6 +413,7 @@ describe('recovery-tests', () => {
       ...process.env,
       DBOS__VMID: 'local',
       DBOS__APPVERSION: workerAppVersion,
+      DBOS_TEST_SQLITE_URL: config.systemDatabaseUrl,
     });
     await startWorker.waitFor('STARTED');
     const startResult = await startWorker.done;
@@ -426,11 +423,13 @@ describe('recovery-tests', () => {
       ...process.env,
       DBOS__VMID: 'test-recv-worker-1',
       DBOS__APPVERSION: workerAppVersion,
+      DBOS_TEST_SQLITE_URL: config.systemDatabaseUrl,
     });
     const recoveryWorker2 = spawnRecvWorker(['recover', workflowID, topic, `${timeoutSeconds}`, barrierPath], {
       ...process.env,
       DBOS__VMID: 'test-recv-worker-2',
       DBOS__APPVERSION: workerAppVersion,
+      DBOS_TEST_SQLITE_URL: config.systemDatabaseUrl,
     });
 
     try {

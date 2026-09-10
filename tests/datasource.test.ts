@@ -21,7 +21,7 @@ import {
   registerDataSource,
   replayRecordedStep,
 } from '../src/datasource';
-import { generateDBOSTestConfig, setUpDBOSTestSysDb } from './helpers';
+import { generateDBOSTestConfig, getPostgresTestUrl, setUpDBOSTestSysDb, usingSQLite } from './helpers';
 import { AsyncLocalStorage } from 'async_hooks';
 import { DBOSInvalidWorkflowTransitionError } from '../src/error';
 import { sleepms } from '../src/utils';
@@ -384,7 +384,9 @@ async function wfFunctionGuts() {
 const wfFunction = DBOS.registerWorkflow(wfFunctionGuts, { name: 'workflow' });
 
 // Intentionally initialize DS after we've already tried to register a transaction to it
-const dsa = new DBOSKnexDS('knexA', { connectionString: config.systemDatabaseUrl });
+const dsa = new DBOSKnexDS('knexA', {
+  connectionString: usingSQLite() ? getPostgresTestUrl() : config.systemDatabaseUrl,
+});
 
 // Decoratory example
 class DBWFI {

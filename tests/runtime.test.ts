@@ -1,7 +1,7 @@
 import { spawn, execSync, ChildProcess } from 'child_process';
 import { Writable } from 'stream';
 import { Client } from 'pg';
-import { generateDBOSTestConfig } from './helpers';
+import { generateDBOSTestConfig, usingSQLite } from './helpers';
 import { sleepms } from '../src/utils';
 
 async function waitForMessageTest(command: ChildProcess, port: string, checkResponse: boolean = true) {
@@ -79,7 +79,7 @@ function configureTemplate() {
   execSync(`npx dbos migrate`, { env: process.env, stdio: 'inherit' });
 }
 
-describe('runtime-tests-knex', () => {
+(usingSQLite() ? describe.skip : describe)('runtime-tests-knex', () => {
   beforeAll(async () => {
     await resetTemplateDatabases();
     process.chdir('packages/create/templates/dbos-knex');
@@ -146,7 +146,7 @@ describe('runtime-tests-knex', () => {
   });
 });
 
-describe('runtime-tests-typeorm', () => {
+(usingSQLite() ? describe.skip : describe)('runtime-tests-typeorm', () => {
   beforeAll(async () => {
     await resetTemplateDatabases();
     process.chdir('packages/create/templates/dbos-typeorm');
@@ -170,7 +170,7 @@ describe('runtime-tests-typeorm', () => {
   });
 });
 
-describe('runtime-tests-prisma', () => {
+(usingSQLite() ? describe.skip : describe)('runtime-tests-prisma', () => {
   beforeAll(async () => {
     await resetTemplateDatabases();
     process.chdir('packages/create/templates/dbos-prisma');
@@ -194,7 +194,7 @@ describe('runtime-tests-prisma', () => {
   });
 });
 
-describe('runtime-tests-drizzle', () => {
+(usingSQLite() ? describe.skip : describe)('runtime-tests-drizzle', () => {
   beforeAll(async () => {
     await resetTemplateDatabases();
     process.chdir('packages/create/templates/dbos-drizzle');

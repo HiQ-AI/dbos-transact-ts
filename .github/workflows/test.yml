@@ -15,6 +15,11 @@ jobs:
       fail-fast: false
       matrix:
         node-version: ['20', '22', '24']
+        database: ['POSTGRES', 'SQLITE']
+        exclude:
+          # Native node:sqlite is not available on the supported Node.js 20 line.
+          - node-version: '20'
+            database: 'SQLITE'
 
     services:
       # Postgres service container
@@ -61,6 +66,7 @@ jobs:
           PGPASSWORD: dbos
           DB_PASSWORD: dbos
           DB_USER: postgres
+          DBOS_DATABASE: ${{ matrix.database }}
           DBOS_COCKROACHDB_URL: postgresql://root@localhost:26257/postgres
           NPM_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
           SILENCE_LOGS: true

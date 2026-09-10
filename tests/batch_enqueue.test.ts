@@ -244,12 +244,12 @@ describe('batch-enqueue', () => {
     // Drift the backlog an hour ahead: wall-clock alone can no longer order past it.
     const sysdb = DBOSExecutor.globalInstance!.systemDatabase;
     const future = Date.now() + 3_600_000;
-    await sysdb.pool.query(
-      `UPDATE "${sysdb.schemaName}".workflow_status
-       SET created_at = $1 + CAST(SUBSTRING(workflow_uuid FROM '[0-9]+$') AS BIGINT)
-       WHERE workflow_uuid LIKE $2`,
-      [future, `${prefix}-%`],
-    );
+    for (let i = 0; i < 5; i++) {
+      await sysdb.pool.query(
+        `UPDATE "${sysdb.schemaName}".workflow_status SET created_at = $1 WHERE workflow_uuid = $2`,
+        [future + i, `${prefix}-${i}`],
+      );
+    }
 
     // Simulate a fresh owner: shutting down and relaunching drops the in-memory cursors along with
     // the old SystemDatabase instance, so the next batch can only order correctly by re-seeding.

@@ -16,6 +16,8 @@
 
 ## What is DBOS?
 
+> This HiQ fork contains an experimental SQLite integration. See [FORK.md](FORK.md) for source revisions, constraints and adoption gates. It is not an official DBOS SQLite release.
+
 DBOS provides lightweight durable workflows built on top of Postgres.
 Instead of managing your own workflow orchestrator or task queue system, you can use DBOS to add durable workflows and queues to your program in just a few lines of code.
 

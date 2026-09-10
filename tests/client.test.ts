@@ -1,4 +1,5 @@
 import { workflow_status } from '../schemas/system_db_schema';
+import { Client, PoolConfig } from 'pg';
 import { DBOS, DBOSClient, StatusString } from '../src';
 import { globalParams, sleepms } from '../src/utils';
 import {
@@ -8,8 +9,8 @@ import {
   retryUntilSuccess,
   setUpDBOSTestSysDb,
   setWfAndChildrenToPending,
+  usingSQLite,
 } from './helpers';
-import { Client, PoolConfig } from 'pg';
 import { spawnSync } from 'child_process';
 import {
   DBOSQueueDuplicatedError,
@@ -125,12 +126,15 @@ describe('DBOSClient', () => {
   let config: DBOSConfig;
   let systemDatabaseUrl: string;
   let poolConfig: PoolConfig;
+  // The public caller-owned transaction API explicitly requires a pg ClientBase.
+  // These tests exercise PostgreSQL transaction visibility and aborted-transaction semantics.
+  const postgresTransactionTest = usingSQLite() ? test.skip : test;
 
   beforeAll(async () => {
     config = generateDBOSTestConfig();
     expect(config.systemDatabaseUrl).toBeDefined();
     systemDatabaseUrl = config.systemDatabaseUrl!;
-    poolConfig = { connectionString: config.systemDatabaseUrl };
+    poolConfig = { connectionString: systemDatabaseUrl };
     await setUpDBOSTestSysDb(config);
   });
 
@@ -171,11 +175,11 @@ describe('DBOSClient', () => {
     });
     try {
       const sysdb = client['systemDatabase'];
-      expect(sysdb.pool.options.max).toBe(8);
+      expect(sysdb.pool.options.max).toBe(usingSQLite() ? 1 : 8);
       expect(sysdb.schemaName).toBe('custom_schema');
       // The semaphore is initialized with the requested `systemDatabasePollingConcurrency` (3),
       // not the half-the-pool default (which would be 4 for a pool size of 8).
-      expect(sysdb.pollLimiter['available']).toBe(3);
+      expect(sysdb.pollLimiter['available']).toBe(usingSQLite() ? 1 : 3);
     } finally {
       await client.destroy();
     }
@@ -185,8 +189,8 @@ describe('DBOSClient', () => {
     const defaultClient = await DBOSClient.create({ systemDatabaseUrl });
     try {
       const sysdb = defaultClient['systemDatabase'];
-      expect(sysdb.pool.options.max).toBe(DEFAULT_POOL_SIZE);
-      expect(sysdb.pollLimiter['available']).toBe(Math.floor(DEFAULT_POOL_SIZE / 2));
+      expect(sysdb.pool.options.max).toBe(usingSQLite() ? 1 : DEFAULT_POOL_SIZE);
+      expect(sysdb.pollLimiter['available']).toBe(usingSQLite() ? 1 : Math.floor(DEFAULT_POOL_SIZE / 2));
     } finally {
       await defaultClient.destroy();
     }
@@ -341,10 +345,9 @@ describe('DBOSClient', () => {
       await client.destroy();
     }
 
-    const dbClient = new Client(poolConfig);
+    const dbClient = await DBOSClient.create({ systemDatabaseUrl });
     try {
-      await dbClient.connect();
-      const resultBefore = await dbClient.query<workflow_status>(
+      const resultBefore = await dbClient['systemDatabase'].pool.query<workflow_status>(
         'SELECT * FROM dbos.workflow_status WHERE workflow_uuid = $1',
         [wfid],
       );
@@ -359,7 +362,7 @@ describe('DBOSClient', () => {
       const wfresult = await handle.getResult();
       expect(wfresult).toBe('42-test-{"first":"John","last":"Doe","age":30}');
 
-      const resultAfter = await dbClient.query<workflow_status>(
+      const resultAfter = await dbClient['systemDatabase'].pool.query<workflow_status>(
         'SELECT * FROM dbos.workflow_status WHERE workflow_uuid = $1',
         [wfid],
       );
@@ -368,7 +371,7 @@ describe('DBOSClient', () => {
       expect(resultAfter.rows[0].status).toBe('SUCCESS');
       expect(resultAfter.rows[0].application_version).toBe(globalParams.appVersion);
     } finally {
-      await dbClient.end();
+      await dbClient.destroy();
     }
   });
 
@@ -399,10 +402,9 @@ describe('DBOSClient', () => {
       await client.destroy();
     }
 
-    const dbClient = new Client(poolConfig);
+    const dbClient = await DBOSClient.create({ systemDatabaseUrl });
     try {
-      await dbClient.connect();
-      const result = await dbClient.query<workflow_status>(
+      const result = await dbClient['systemDatabase'].pool.query<workflow_status>(
         'SELECT * FROM dbos.workflow_status WHERE workflow_uuid = $1',
         [wfid],
       );
@@ -411,7 +413,7 @@ describe('DBOSClient', () => {
       expect(result.rows[0].status).toBe('SUCCESS');
       expect(result.rows[0].application_version).toBe(globalParams.appVersion);
     } finally {
-      await dbClient.end();
+      await dbClient.destroy();
     }
   });
 
@@ -448,10 +450,9 @@ describe('DBOSClient', () => {
       await client.destroy();
     }
 
-    const dbClient = new Client(poolConfig);
+    const dbClient = await DBOSClient.create({ systemDatabaseUrl });
     try {
-      await dbClient.connect();
-      const result = await dbClient.query<workflow_status>(
+      const result = await dbClient['systemDatabase'].pool.query<workflow_status>(
         'SELECT * FROM dbos.workflow_status WHERE workflow_uuid = $1',
         [wfid],
       );
@@ -460,7 +461,7 @@ describe('DBOSClient', () => {
       expect(result.rows[0].status).toBe('SUCCESS');
       expect(result.rows[0].application_version).toBe(version);
     } finally {
-      await dbClient.end();
+      await dbClient.destroy();
     }
   });
 
@@ -526,10 +527,9 @@ describe('DBOSClient', () => {
       await client.destroy();
     }
 
-    const dbClient = new Client(poolConfig);
+    const dbClient = await DBOSClient.create({ systemDatabaseUrl });
     try {
-      await dbClient.connect();
-      const result = await dbClient.query<workflow_status>(
+      const result = await dbClient['systemDatabase'].pool.query<workflow_status>(
         'SELECT * FROM dbos.workflow_status WHERE workflow_uuid = $1',
         [wfid],
       );
@@ -538,7 +538,7 @@ describe('DBOSClient', () => {
       expect(result.rows[0].status).toBe('SUCCESS');
       expect(result.rows[0].application_version).toBe(version);
     } finally {
-      await dbClient.end();
+      await dbClient.destroy();
     }
   });
 
@@ -666,10 +666,9 @@ describe('DBOSClient', () => {
     const result = await handle.getResult();
     expect(result).toBe('42-test-{"first":"John","last":"Doe","age":30}');
 
-    const dbClient = new Client(poolConfig);
+    const dbClient = await DBOSClient.create({ systemDatabaseUrl });
     try {
-      await dbClient.connect();
-      const result = await dbClient.query<workflow_status>(
+      const result = await dbClient['systemDatabase'].pool.query<workflow_status>(
         'SELECT * FROM dbos.workflow_status WHERE workflow_uuid = $1',
         [wfid],
       );
@@ -678,7 +677,7 @@ describe('DBOSClient', () => {
       expect(result.rows[0].status).toBe('SUCCESS');
       expect(result.rows[0].application_version).toBe(globalParams.appVersion);
     } finally {
-      await dbClient.end();
+      await dbClient.destroy();
     }
   });
 
@@ -705,10 +704,9 @@ describe('DBOSClient', () => {
     await registerTestQueue();
     await sleepms(10000);
 
-    const dbClient = new Client(poolConfig);
+    const dbClient = await DBOSClient.create({ systemDatabaseUrl });
     try {
-      await dbClient.connect();
-      const result = await dbClient.query<workflow_status>(
+      const result = await dbClient['systemDatabase'].pool.query<workflow_status>(
         'SELECT * FROM dbos.workflow_status WHERE application_version = $1',
         ['1234567890ABCDEF'],
       );
@@ -716,7 +714,7 @@ describe('DBOSClient', () => {
       expect(result.rows[0].status).toBe('ENQUEUED');
       expect(result.rows[0].application_version).toBe('1234567890ABCDEF');
     } finally {
-      await dbClient.end();
+      await dbClient.destroy();
     }
   });
 
@@ -761,7 +759,7 @@ describe('DBOSClient', () => {
     expect(result).toBe(message);
   });
 
-  test('DBOSClient-send-idempotent', async () => {
+  (usingSQLite() ? test.skip : test)('DBOSClient-send-idempotent', async () => {
     const now = Date.now();
     const workflowID = `client-send-${now}`;
     const topic = `test-topic-${now}`;
@@ -780,13 +778,15 @@ describe('DBOSClient', () => {
       await client.destroy();
     }
 
-    const dbClient = new Client(poolConfig);
+    const dbClient = await DBOSClient.create({ systemDatabaseUrl });
     try {
-      await dbClient.connect();
-      const res = await dbClient.query('SELECT * FROM dbos.notifications WHERE destination_uuid = $1', [workflowID]);
+      const res = await dbClient['systemDatabase'].pool.query(
+        'SELECT * FROM dbos.notifications WHERE destination_uuid = $1',
+        [workflowID],
+      );
       expect(res.rows).toHaveLength(1);
     } finally {
-      await dbClient.end();
+      await dbClient.destroy();
     }
 
     await recoverPendingWorkflows();
@@ -816,7 +816,7 @@ describe('DBOSClient', () => {
     expect(result).toBe(message);
   });
 
-  test('DBOSClient-enqueueInTransaction-commit', async () => {
+  postgresTransactionTest('DBOSClient-enqueueInTransaction-commit', async () => {
     await DBOS.launch();
     await registerTestQueue();
 
@@ -859,7 +859,7 @@ describe('DBOSClient', () => {
     }
   });
 
-  test('DBOSClient-enqueueInTransaction-rollback', async () => {
+  postgresTransactionTest('DBOSClient-enqueueInTransaction-rollback', async () => {
     await DBOS.launch();
     await registerTestQueue();
 
@@ -894,7 +894,7 @@ describe('DBOSClient', () => {
     }
   });
 
-  test('DBOSClient-enqueueInTransaction-idempotent', async () => {
+  postgresTransactionTest('DBOSClient-enqueueInTransaction-idempotent', async () => {
     await DBOS.launch();
     await registerTestQueue();
 
@@ -931,7 +931,7 @@ describe('DBOSClient', () => {
     }
   });
 
-  test('DBOSClient-enqueueInTransaction-deduplication', async () => {
+  postgresTransactionTest('DBOSClient-enqueueInTransaction-deduplication', async () => {
     // DBOS is not launched, so the enqueued workflow keeps holding the deduplication slot.
     const client = await DBOSClient.create({ systemDatabaseUrl });
     const now = Date.now();
@@ -979,7 +979,7 @@ describe('DBOSClient', () => {
     }
   });
 
-  test('DBOSClient-enqueueInTransaction-rejects-return-existing', async () => {
+  postgresTransactionTest('DBOSClient-enqueueInTransaction-rejects-return-existing', async () => {
     const client = await DBOSClient.create({ systemDatabaseUrl });
     const now = Date.now();
     const txClient = new Client(poolConfig);
@@ -1009,7 +1009,7 @@ describe('DBOSClient', () => {
     }
   });
 
-  test('DBOSClient-enqueuePortableInTransaction-commit', async () => {
+  postgresTransactionTest('DBOSClient-enqueuePortableInTransaction-commit', async () => {
     await DBOS.launch();
     await registerTestQueue();
 
@@ -1053,7 +1053,7 @@ describe('DBOSClient', () => {
     }
   });
 
-  test('DBOSClient-sendInTransaction-commit', async () => {
+  postgresTransactionTest('DBOSClient-sendInTransaction-commit', async () => {
     const now = Date.now();
     const workflowID = `client-send-tx-${now}`;
     const topic = `test-topic-${now}`;
@@ -1086,7 +1086,7 @@ describe('DBOSClient', () => {
     }
   });
 
-  test('DBOSClient-sendInTransaction-rollback', async () => {
+  postgresTransactionTest('DBOSClient-sendInTransaction-rollback', async () => {
     const now = Date.now();
     const workflowID = `client-send-tx-rollback-${now}`;
     const topic = `test-topic-${now}`;
@@ -1116,7 +1116,7 @@ describe('DBOSClient', () => {
     }
   });
 
-  test('DBOSClient-sendInTransaction-idempotent', async () => {
+  postgresTransactionTest('DBOSClient-sendInTransaction-idempotent', async () => {
     const now = Date.now();
     const workflowID = `client-send-tx-idempotent-${now}`;
     const topic = `test-topic-${now}`;
@@ -1146,7 +1146,7 @@ describe('DBOSClient', () => {
     }
   });
 
-  test('DBOSClient-enqueue-and-send-in-transaction', async () => {
+  postgresTransactionTest('DBOSClient-enqueue-and-send-in-transaction', async () => {
     await DBOS.launch();
     await registerTestQueue();
 
@@ -1183,7 +1183,7 @@ describe('DBOSClient', () => {
     }
   });
 
-  test('DBOSClient-in-transaction-with-caller-writes', async () => {
+  postgresTransactionTest('DBOSClient-in-transaction-with-caller-writes', async () => {
     // The documented use case: the caller's own rows and the DBOS work commit or roll back together.
     await DBOS.launch();
     await registerTestQueue();
@@ -1247,7 +1247,7 @@ describe('DBOSClient', () => {
     }
   });
 
-  test('DBOSClient-in-transaction-rejects-unusable-clients', async () => {
+  postgresTransactionTest('DBOSClient-in-transaction-rejects-unusable-clients', async () => {
     const client = await DBOSClient.create({ systemDatabaseUrl });
     const now = Date.now();
     const options = {

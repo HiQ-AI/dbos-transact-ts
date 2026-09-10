@@ -5,11 +5,54 @@ import { DBOSExecutor } from '../src/dbos-executor';
 import { DBOSQueryTimeoutError } from '../src/error';
 import { DBOSJSON, DBOSSerializer } from '../src/serialization';
 import { SystemDatabase } from '../src/system_database';
+import { SQLiteClient } from '../src/sqlite_system_database';
 import { GlobalLogger } from '../src/telemetry/logs';
 import { getClientConfig } from '../src/utils';
-import { generateDBOSTestConfig, setUpDBOSTestSysDb } from './helpers';
+import { generateDBOSTestConfig, setUpDBOSTestSysDb, usingSQLite } from './helpers';
 
-describe('observability-query-timeout', () => {
+(usingSQLite() ? describe : describe.skip)('sqlite-observability-without-postgres-session-timeout', () => {
+  let config: DBOSConfig;
+
+  beforeAll(async () => {
+    config = generateDBOSTestConfig();
+    await setUpDBOSTestSysDb(config);
+  });
+
+  test('public observability queries execute without PostgreSQL session settings', async () => {
+    const sysdb = new SystemDatabase(translateDbosConfig(config).systemDatabaseUrl, new GlobalLogger(), DBOSJSON);
+    // Spy on real SQLite execution, rather than a PostgreSQL pool connect event.
+    const queries = jest.spyOn(SQLiteClient.prototype, 'query');
+    const workflowID = 'no-such-workflow';
+    const start = new Date(Date.now() - 3600_000).toISOString();
+    const end = new Date(Date.now() + 3600_000).toISOString();
+    const calls: Array<() => Promise<unknown>> = [
+      () => sysdb.listWorkflows({}),
+      () => sysdb.getAllOperationResults(workflowID),
+      () => sysdb.getWorkflowAggregates({ groupByStatus: true, selectCount: true }),
+      () => sysdb.getStepAggregates({ groupByFunctionName: true, selectCount: true }),
+      () => sysdb.getMetrics(start, end),
+      () => sysdb.getAllEvents(workflowID),
+      () => sysdb.getAllNotifications(workflowID),
+      () => sysdb.getAllStreamEntries(workflowID),
+      () => sysdb.listApplicationVersions(),
+    ];
+    try {
+      for (const call of calls) {
+        queries.mockClear();
+        await expect(call()).resolves.toBeDefined();
+        expect(queries).toHaveBeenCalled();
+        const statements = queries.mock.calls.map(([sql]) => sql);
+        expect(statements.filter((sql) => /statement_timeout|READ COMMITTED/i.test(sql))).toEqual([]);
+      }
+    } finally {
+      queries.mockRestore();
+      await sysdb.destroy();
+    }
+  });
+});
+
+// PostgreSQL statement_timeout, locks and session settings are not SQLite primitives.
+(usingSQLite() ? describe.skip : describe)('observability-query-timeout', () => {
   let config: DBOSConfig;
   let systemDatabaseUrl: string;
 

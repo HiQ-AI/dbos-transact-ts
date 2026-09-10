@@ -14,7 +14,7 @@ import { getCurrentSysDBVersion } from '../src/sysdb_migrations/migration_runner
 import { ensureSystemDatabase } from '../src/system_database';
 import { maskDatabaseUrl } from '../src/database_utils';
 import { GlobalLogger } from '../src/telemetry/logs';
-import { generateDBOSTestConfig } from './helpers';
+import { generateDBOSTestConfig, usingSQLite } from './helpers';
 
 const FUNNY_SCHEMA = 'F8nny_sCHem@-n@m3';
 const LATEST = allMigrations().length;
@@ -209,78 +209,86 @@ describe('schema --print-migrations and --print-user-role', () => {
     }
   });
 
-  test('printed statements apply to a fresh database and the runner then treats it as migrated', async () => {
-    const dbName = 'schema_print_sql_test_db';
-    const { adminUrl, dbUrl } = testUrls(dbName);
-    await recreateDatabase(adminUrl, dbName);
+  (usingSQLite() ? test.skip : test)(
+    'printed statements apply to a fresh database and the runner then treats it as migrated',
+    async () => {
+      const dbName = 'schema_print_sql_test_db';
+      const { adminUrl, dbUrl } = testUrls(dbName);
+      await recreateDatabase(adminUrl, dbName);
 
-    const { status, out, err } = await runPrint(dbUrl, { printMigrations: 'all', schemaName: FUNNY_SCHEMA });
-    expect(status).toBe(0);
-    expect(err).toBe('');
-    expect(out).toContain(`CREATE SCHEMA IF NOT EXISTS "${FUNNY_SCHEMA}";`);
-    // The schema name never appears unquoted before a dot (psql would fold or reject it).
-    expect(out).not.toMatch(/[^"]F8nny_sCHem@-n@m3"?\./);
-    expect(out).not.toContain('"dbos".');
-
-    const client = new Client({ connectionString: dbUrl });
-    await client.connect();
-    try {
-      // Apply each printed statement in autocommit, as psql would.
-      for (const stmt of generateMigrationStatements(FUNNY_SCHEMA)) {
-        await client.query(stmt);
-      }
-      const versionRows = await client.query<{ version: string }>(
-        `SELECT "version" FROM "${FUNNY_SCHEMA}"."dbos_migrations"`,
-      );
-      expect(versionRows.rows).toHaveLength(1);
-      expect(Number(versionRows.rows[0].version)).toBe(LATEST);
-
-      // A real migration pass treats the scripted database as fully migrated.
-      await ensureSystemDatabase(dbUrl, new GlobalLogger(), undefined, FUNNY_SCHEMA);
-      expect(await getCurrentSysDBVersion(client, FUNNY_SCHEMA)).toBe(LATEST);
-      const afterEnsure = await client.query(`SELECT "version" FROM "${FUNNY_SCHEMA}"."dbos_migrations"`);
-      expect(afterEnsure.rows).toHaveLength(1);
-    } finally {
-      await client.end();
-      await dropDatabase(adminUrl, dbName);
-    }
-  }, 60000);
-
-  test('a partial database is completed by the print-migrations latest output', async () => {
-    const dbName = 'schema_print_partial_test_db';
-    const { adminUrl, dbUrl } = testUrls(dbName);
-    await recreateDatabase(adminUrl, dbName);
-
-    const client = new Client({ connectionString: dbUrl });
-    await client.connect();
-    try {
-      // Truncate the full script right after the version latest-1 bookkeeping.
-      const statements = generateMigrationStatements('dbos');
-      const marker = `UPDATE "dbos"."dbos_migrations" SET "version" = ${LATEST - 1};`;
-      const markerIdx = statements.indexOf(marker);
-      expect(markerIdx).toBeGreaterThan(-1);
-      for (const stmt of statements.slice(0, markerIdx + 1)) {
-        await client.query(stmt);
-      }
-      expect(await getCurrentSysDBVersion(client, 'dbos')).toBe(LATEST - 1);
-
-      // The last migration printed alone applies on top of version latest-1.
-      const { status, out } = await runPrint(dbUrl, { printMigrations: String(LATEST) });
+      const { status, out, err } = await runPrint(dbUrl, { printMigrations: 'all', schemaName: FUNNY_SCHEMA });
       expect(status).toBe(0);
-      expect(out).not.toContain('CREATE SCHEMA');
-      expect(out).not.toContain('DO $$');
-      for (const stmt of generateMigrationStatements('dbos', LATEST)) {
-        await client.query(stmt);
-      }
-      expect(await getCurrentSysDBVersion(client, 'dbos')).toBe(LATEST);
+      expect(err).toBe('');
+      expect(out).toContain(`CREATE SCHEMA IF NOT EXISTS "${FUNNY_SCHEMA}";`);
+      // The schema name never appears unquoted before a dot (psql would fold or reject it).
+      expect(out).not.toMatch(/[^"]F8nny_sCHem@-n@m3"?\./);
+      expect(out).not.toContain('"dbos".');
 
-      await ensureSystemDatabase(dbUrl, new GlobalLogger());
-      expect(await getCurrentSysDBVersion(client, 'dbos')).toBe(LATEST);
-    } finally {
-      await client.end();
-      await dropDatabase(adminUrl, dbName);
-    }
-  }, 60000);
+      const client = new Client({ connectionString: dbUrl });
+      await client.connect();
+      try {
+        // Apply each printed statement in autocommit, as psql would.
+        for (const stmt of generateMigrationStatements(FUNNY_SCHEMA)) {
+          await client.query(stmt);
+        }
+        const versionRows = await client.query<{ version: string }>(
+          `SELECT "version" FROM "${FUNNY_SCHEMA}"."dbos_migrations"`,
+        );
+        expect(versionRows.rows).toHaveLength(1);
+        expect(Number(versionRows.rows[0].version)).toBe(LATEST);
+
+        // A real migration pass treats the scripted database as fully migrated.
+        await ensureSystemDatabase(dbUrl, new GlobalLogger(), undefined, FUNNY_SCHEMA);
+        expect(await getCurrentSysDBVersion(client, FUNNY_SCHEMA)).toBe(LATEST);
+        const afterEnsure = await client.query(`SELECT "version" FROM "${FUNNY_SCHEMA}"."dbos_migrations"`);
+        expect(afterEnsure.rows).toHaveLength(1);
+      } finally {
+        await client.end();
+        await dropDatabase(adminUrl, dbName);
+      }
+    },
+    60000,
+  );
+
+  (usingSQLite() ? test.skip : test)(
+    'a partial database is completed by the print-migrations latest output',
+    async () => {
+      const dbName = 'schema_print_partial_test_db';
+      const { adminUrl, dbUrl } = testUrls(dbName);
+      await recreateDatabase(adminUrl, dbName);
+
+      const client = new Client({ connectionString: dbUrl });
+      await client.connect();
+      try {
+        // Truncate the full script right after the version latest-1 bookkeeping.
+        const statements = generateMigrationStatements('dbos');
+        const marker = `UPDATE "dbos"."dbos_migrations" SET "version" = ${LATEST - 1};`;
+        const markerIdx = statements.indexOf(marker);
+        expect(markerIdx).toBeGreaterThan(-1);
+        for (const stmt of statements.slice(0, markerIdx + 1)) {
+          await client.query(stmt);
+        }
+        expect(await getCurrentSysDBVersion(client, 'dbos')).toBe(LATEST - 1);
+
+        // The last migration printed alone applies on top of version latest-1.
+        const { status, out } = await runPrint(dbUrl, { printMigrations: String(LATEST) });
+        expect(status).toBe(0);
+        expect(out).not.toContain('CREATE SCHEMA');
+        expect(out).not.toContain('DO $$');
+        for (const stmt of generateMigrationStatements('dbos', LATEST)) {
+          await client.query(stmt);
+        }
+        expect(await getCurrentSysDBVersion(client, 'dbos')).toBe(LATEST);
+
+        await ensureSystemDatabase(dbUrl, new GlobalLogger());
+        expect(await getCurrentSysDBVersion(client, 'dbos')).toBe(LATEST);
+      } finally {
+        await client.end();
+        await dropDatabase(adminUrl, dbName);
+      }
+    },
+    60000,
+  );
 
   test('spawned CLI prints pure SQL to stdout, nothing to stderr, exit 0 with unreachable database', async () => {
     const cliPath = path.resolve(__dirname, '..', 'dist', 'src', 'cli', 'cli.js');

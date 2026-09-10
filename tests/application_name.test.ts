@@ -1,8 +1,13 @@
-import { Client } from 'pg';
 import { DBOS, DBOSClient, StatusString } from '../src';
 import { DBOSConfig, DBOSExecutor } from '../src/dbos-executor';
 import { garbageCollect, globalTimeout } from '../src/workflow_management';
-import { cutoffPastAllCompletions, generateDBOSTestConfig, setUpDBOSTestSysDb } from './helpers';
+import {
+  cutoffPastAllCompletions,
+  connectToDBOSTestSystemDatabase,
+  DBOSTestSystemDatabaseClient,
+  generateDBOSTestConfig,
+  setUpDBOSTestSysDb,
+} from './helpers';
 import { globalParams } from '../src/utils';
 import type { GetWorkflowsInput } from '../src/workflow';
 
@@ -11,13 +16,12 @@ type NoArgWorkflow = () => Promise<unknown>;
 const APP = 'appname-test-app';
 const PEER = 'appname-test-peer';
 
-async function sysdbClient(config: DBOSConfig): Promise<Client> {
-  const client = new Client({ connectionString: config.systemDatabaseUrl });
-  await client.connect();
-  return client;
-}
-
-async function ownerOf(client: Client, table: string, keyColumn: string, key: string): Promise<string | null> {
+async function ownerOf(
+  client: DBOSTestSystemDatabaseClient,
+  table: string,
+  keyColumn: string,
+  key: string,
+): Promise<string | null> {
   const { rows } = await client.query<{ application_name: string | null }>(
     `SELECT application_name FROM dbos.${table} WHERE ${keyColumn} = $1`,
     [key],
@@ -27,7 +31,7 @@ async function ownerOf(client: Client, table: string, keyColumn: string, key: st
 
 /** Insert a step row as though a peer application had recorded it. */
 async function insertPeerStep(
-  client: Client,
+  client: DBOSTestSystemDatabaseClient,
   workflowID: string,
   functionName: string,
   options: { applicationName?: string | null } = {},
@@ -43,7 +47,7 @@ async function insertPeerStep(
 
 /** Insert a workflow row as though a peer application had enqueued it. */
 async function insertPeerWorkflow(
-  client: Client,
+  client: DBOSTestSystemDatabaseClient,
   id: string,
   options: {
     queueName?: string;
@@ -71,14 +75,14 @@ async function insertPeerWorkflow(
 
 describe('application-name', () => {
   let config: DBOSConfig;
-  let client: Client;
+  let client: DBOSTestSystemDatabaseClient;
 
   beforeEach(async () => {
     config = generateDBOSTestConfig();
     config.name = APP;
     await setUpDBOSTestSysDb(config);
     DBOS.setConfig(config);
-    client = await sysdbClient(config);
+    client = await connectToDBOSTestSystemDatabase(config);
   });
 
   afterEach(async () => {

@@ -456,9 +456,9 @@ describe('dbos-streaming-tests', () => {
   });
 
   test('stream-low-latency-delivery', async () => {
-    // Values should reach a blocked reader promptly via LISTEN/NOTIFY rather than
-    // after a fixed polling interval. Each value carries the wall-clock time it was
-    // written; the reader asserts it received the value shortly after.
+    // PostgreSQL delivers via LISTEN/NOTIFY; SQLite needs an explicit polling budget
+    // for the same latency target. Each value carries its write time so both paths
+    // must deliver every value promptly rather than merely finish the stream.
     const streamKey = 'latency_stream';
     const numValues = 3;
 
@@ -487,14 +487,15 @@ describe('dbos-streaming-tests', () => {
 
     await DBOS.launch();
 
-    // In-process DBOS reader: woken by LISTEN/NOTIFY, so delivery is single-digit
-    // milliseconds. A 1s polling fallback would average ~0.5s and frequently exceed
-    // this across several values.
+    // Leave PostgreSQL's default polling interval unchanged to exercise notifications.
+    // SQLite has no LISTEN/NOTIFY: its default 1s polling cannot promise <500ms.
     const wfid = randomUUID();
     const handle = await DBOS.withNextWorkflowID(wfid, async () => {
       return DBOS.startWorkflow(writerWorkflow, {})();
     });
-    const notifyResult = await measure(DBOS.readStream(wfid, streamKey));
+    const notifyResult = await measure(
+      DBOS.readStream(wfid, streamKey, usingSQLite() ? { pollingIntervalMs: 50 } : undefined),
+    );
     await handle.getResult();
     expect(notifyResult.count).toBe(numValues);
     expect(notifyResult.maxLatency).toBeLessThan(500);

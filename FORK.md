@@ -35,6 +35,7 @@ Local evidence on 2026-09-10:
 - Electron 40.8.5 / Node 24.14.0, run as a separate test process, loads `node:sqlite` and completes a real SDK workflow. This does not verify a packaged desktop application or Windows.
 - The first CI matrix passed PostgreSQL on Node 20/22/24 and package tests, but failed SQLite. Follow-up fixes add an explicit COUNT alias for queue admission, correct PostgreSQL application-database URLs in mixed-backend tests, and allow equal millisecond timestamps. Targeted SQLite 21/21 and PostgreSQL 22/22 checks pass; the new full CI matrix is pending.
 - File connections explicitly set WAL and synchronous=FULL rather than inheriting host SQLite compile defaults. Reopen tests verify both settings; this is not a simulated power-loss test.
+- The follow-up CI passed the full Node 24 SQLite suite. Node 22 exposed a stream test assuming notification latency despite SQLite's default one-second polling. The test now explicitly requests 50ms SQLite polling without relaxing its 500ms bound; PostgreSQL still uses notifications, and default polling has separate coverage. Node 22 streaming regression: 37 passed, 5 existing backend-specific skips. Full final matrix remains pending.
 
 Upstream namespace publication is disabled for forks. Consume only an immutable verified downstream artifact, not an unbuilt branch or a mutable replacement for the upstream npm package. No automatic desktop release is authorized by this integration.
 

@@ -1,5 +1,12 @@
 import { WorkflowHandle, DBOS, DBOSSerializer } from '../src/';
-import { generateDBOSTestConfig, setUpDBOSTestSysDb, Event } from './helpers';
+import {
+  generateDBOSTestConfig,
+  setUpDBOSTestSysDb,
+  Event,
+  usingSQLite,
+  connectToDBOSTestSystemDatabase,
+  dropDatabase,
+} from './helpers';
 import { randomUUID } from 'node:crypto';
 import { StatusString } from '../src/workflow';
 import { DBOSConfig } from '../src/dbos-executor';
@@ -9,6 +16,9 @@ import assert from 'node:assert';
 import { DBOSClient } from '../dist/src';
 import { deriveDatabaseUrl, dropPGDatabase, ensurePGDatabase, getDatabaseNameFromUrl } from '../src/database_utils';
 import { sleepConfig } from '../src/utils';
+import { existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const silentDropLogger = { warn: () => {} };
 
@@ -41,22 +51,10 @@ describe('dbos-tests', () => {
   });
 
   test('simple-workflow-attempts-counter', async () => {
-    const systemDBClient = new Client({
-      connectionString: config.systemDatabaseUrl,
-    });
-    try {
-      await systemDBClient.connect();
-      const handle = await DBOS.startWorkflow(DBOSTestClass).noopWorkflow();
-      for (let i = 0; i < 10; i++) {
-        await DBOS.startWorkflow(DBOSTestClass, { workflowID: handle.workflowID }).noopWorkflow();
-        const result = await systemDBClient.query<{ status: string; attempts: number }>(
-          `SELECT status, recovery_attempts as attempts FROM dbos.workflow_status WHERE workflow_uuid=$1`,
-          [handle.workflowID],
-        );
-        expect(result.rows[0].attempts).toBe(String(1));
-      }
-    } finally {
-      await systemDBClient.end();
+    const handle = await DBOS.startWorkflow(DBOSTestClass).noopWorkflow();
+    for (let i = 0; i < 10; i++) {
+      await DBOS.startWorkflow(DBOSTestClass, { workflowID: handle.workflowID }).noopWorkflow();
+      expect((await handle.getStatus())?.recoveryAttempts).toBe(1);
     }
   });
 
@@ -1064,7 +1062,7 @@ describe('custom-pool-test', () => {
     await DBOS.shutdown();
   });
 
-  test('custom-pool-test', async () => {
+  (usingSQLite() ? test.skip : test)('custom-pool-test', async () => {
     const baseConfig = generateDBOSTestConfig();
     // Destroy the system database
     await dropPGDatabase(baseConfig.systemDatabaseUrl!, silentDropLogger);
@@ -1131,7 +1129,7 @@ describe('custom-pool-test', () => {
   });
 });
 
-describe('custom-pool-lifecycle', () => {
+(usingSQLite() ? describe.skip : describe)('custom-pool-lifecycle', () => {
   let config: DBOSConfig;
   let systemDatabaseUrl: string;
 
@@ -1262,16 +1260,20 @@ describe('run-migrations-flag', () => {
   let config: DBOSConfig;
   // A throwaway system database, so a failed verification never touches the shared test one.
   let unmigratedUrl: string;
+  let sqlitePath: string;
 
   beforeAll(async () => {
     config = generateDBOSTestConfig();
     await setUpDBOSTestSysDb(config);
-    unmigratedUrl = deriveDatabaseUrl(config.systemDatabaseUrl!, 'dbostest_unmigrated_sys');
+    sqlitePath = join(tmpdir(), `dbos-unmigrated-${randomUUID()}.sqlite`);
+    unmigratedUrl = usingSQLite()
+      ? `sqlite:////${sqlitePath.replace(/^\/+/, '')}`
+      : deriveDatabaseUrl(config.systemDatabaseUrl!, 'dbostest_unmigrated_sys');
   });
 
   afterEach(async () => {
     await DBOS.shutdown();
-    await dropPGDatabase(unmigratedUrl, silentDropLogger);
+    await dropDatabase(unmigratedUrl);
   });
 
   test('launches against an already-migrated system database', async () => {
@@ -1284,7 +1286,13 @@ describe('run-migrations-flag', () => {
 
   test('throws when the system database is not migrated', async () => {
     // The database exists but holds no DBOS schema, so it is at version 0.
-    await ensurePGDatabase(unmigratedUrl, { info: () => {}, warn: () => {} });
+    if (usingSQLite()) {
+      const empty = await connectToDBOSTestSystemDatabase({ ...config, systemDatabaseUrl: unmigratedUrl });
+      await empty.query('SELECT 1');
+      await empty.end();
+    } else {
+      await ensurePGDatabase(unmigratedUrl, { info: () => {}, warn: () => {} });
+    }
     DBOS.setConfig({ ...config, systemDatabaseUrl: unmigratedUrl, runMigrations: false });
 
     const error = await DBOS.launch().then(
@@ -1295,11 +1303,12 @@ describe('run-migrations-flag', () => {
     expect((error as Error).message).toMatch(/is at schema version 0, but this version of DBOS requires/);
 
     // Verification must not have migrated it on the way past.
-    const dbClient = new Client({ connectionString: unmigratedUrl });
+    const dbClient = await connectToDBOSTestSystemDatabase({ ...config, systemDatabaseUrl: unmigratedUrl });
     try {
-      await dbClient.connect();
       const { rows } = await dbClient.query<{ schema_name: string }>(
-        `SELECT schema_name FROM information_schema.schemata WHERE schema_name = 'dbos'`,
+        usingSQLite()
+          ? `SELECT name FROM sqlite_master WHERE type = 'table'`
+          : `SELECT schema_name FROM information_schema.schemata WHERE schema_name = 'dbos'`,
       );
       expect(rows).toHaveLength(0);
     } finally {
@@ -1313,9 +1322,8 @@ describe('run-migrations-flag', () => {
     await DBOS.launch();
     await DBOS.shutdown();
 
-    const dbClient = new Client({ connectionString: unmigratedUrl });
+    const dbClient = await connectToDBOSTestSystemDatabase({ ...config, systemDatabaseUrl: unmigratedUrl });
     try {
-      await dbClient.connect();
       const { rows } = await dbClient.query<{ version: string }>(
         'UPDATE dbos.dbos_migrations SET version = version + 1000 RETURNING version',
       );
@@ -1333,8 +1341,14 @@ describe('run-migrations-flag', () => {
   });
 
   test('does not create a missing system database', async () => {
+    if (usingSQLite()) expect(existsSync(sqlitePath)).toBe(false);
     DBOS.setConfig({ ...config, systemDatabaseUrl: unmigratedUrl, runMigrations: false });
     await expect(DBOS.launch()).rejects.toThrow(DBOSInitializationError);
+
+    if (usingSQLite()) {
+      expect(existsSync(sqlitePath)).toBe(false);
+      return;
+    }
 
     const dbClient = new Client({ connectionString: deriveDatabaseUrl(unmigratedUrl, 'postgres') });
     try {

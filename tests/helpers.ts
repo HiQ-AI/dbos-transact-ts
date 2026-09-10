@@ -6,6 +6,10 @@ import { ensureSystemDatabase } from '../src/system_database';
 import { GlobalLogger } from '../src/telemetry/logs';
 import { deriveDatabaseUrl, dropPGDatabase, ensurePGDatabase, maskDatabaseUrl } from '../src/database_utils';
 import { Client } from 'pg';
+import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { isSQLiteSystemDatabaseUrl, resetSQLiteSystemDatabase, SQLitePool } from '../src/sqlite_system_database';
 
 const silentDropLogger = { warn: () => {} };
 
@@ -45,8 +49,57 @@ function getSysDatabaseUrlFromUserDb(userDB: string) {
   return url.toString();
 }
 
+export function usingSQLite(): boolean {
+  return process.env.DBOS_DATABASE === 'SQLITE';
+}
+
+export function getPostgresTestUrl(): string {
+  if (process.env.DBOS_TEST_DB_URL) {
+    return process.env.DBOS_TEST_DB_URL;
+  }
+
+  const dbPassword = process.env.DB_PASSWORD || process.env.PGPASSWORD;
+  if (!dbPassword) {
+    throw new Error('DB_PASSWORD or PGPASSWORD environment variable not set');
+  }
+  const dbUser = process.env.DB_USER || process.env.PGUSER || 'postgres';
+  return `postgresql://${dbUser}:${dbPassword}@localhost:5432/postgres?sslmode=disable`;
+}
+
+export type DBOSTestSystemDatabaseClient = Pick<Client, 'query' | 'end'>;
+
+export async function connectToDBOSTestSystemDatabase(config: DBOSConfig): Promise<DBOSTestSystemDatabaseClient> {
+  if (isSQLiteSystemDatabaseUrl(config.systemDatabaseUrl!)) {
+    return new SQLitePool(
+      config.systemDatabaseUrl!,
+      config.systemDatabaseSchemaName ?? 'dbos',
+    ) as unknown as DBOSTestSystemDatabaseClient;
+  }
+
+  const client = new Client({ connectionString: config.systemDatabaseUrl });
+  await client.connect();
+  return client;
+}
+
+function getSQLiteTestUrl(): string {
+  if (process.env.DBOS_TEST_SQLITE_URL) {
+    return process.env.DBOS_TEST_SQLITE_URL;
+  }
+  const filePath = path.join(tmpdir(), `dbos-transact-ts-${process.pid}-${randomUUID()}.sqlite`);
+  return `sqlite:////${filePath.replace(/^\/+/, '')}`;
+}
+
 export function generateDBOSTestConfig(): DBOSConfig {
   const _silenceLogs = process.env.SILENCE_LOGS === 'true';
+
+  if (usingSQLite()) {
+    return {
+      name: 'dbostest',
+      systemDatabaseUrl: getSQLiteTestUrl(),
+      useListenNotify: false,
+      logLevel: _silenceLogs ? 'error' : undefined,
+    };
+  }
 
   let databaseUrl = process.env.DBOS_TEST_DB_URL;
   if (!databaseUrl) {
@@ -63,6 +116,7 @@ export function generateDBOSTestConfig(): DBOSConfig {
   return {
     name: 'dbostest',
     systemDatabaseUrl,
+    logLevel: _silenceLogs ? 'error' : undefined,
     ...(isCockroach ? { useListenNotify: false } : {}),
   };
 }
@@ -70,6 +124,12 @@ export function generateDBOSTestConfig(): DBOSConfig {
 export async function setUpDBOSTestSysDb(config: DBOSConfig) {
   config.name ??= 'dbostest';
   const internalConfig = translateDbosConfig(config);
+
+  if (isSQLiteSystemDatabaseUrl(internalConfig.systemDatabaseUrl)) {
+    resetSQLiteSystemDatabase(internalConfig.systemDatabaseUrl);
+    await ensureSystemDatabase(internalConfig.systemDatabaseUrl, new GlobalLogger(), undefined, undefined, false);
+    return;
+  }
 
   await dropPGDatabase(internalConfig.systemDatabaseUrl, silentDropLogger);
   await ensureSystemDatabase(
@@ -231,6 +291,11 @@ export async function reexecuteWorkflowById(
 }
 
 export async function dropDatabase(connectionString: string, database?: string) {
+  if (isSQLiteSystemDatabaseUrl(connectionString)) {
+    resetSQLiteSystemDatabase(connectionString);
+    return;
+  }
+
   await dropPGDatabase(database ? deriveDatabaseUrl(connectionString, database) : connectionString, silentDropLogger);
 }
 

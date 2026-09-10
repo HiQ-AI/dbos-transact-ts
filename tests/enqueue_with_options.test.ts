@@ -1,21 +1,24 @@
-import { Client } from 'pg';
 import { DBOS, StatusString } from '../src';
 import { DBOSConfig } from '../src/dbos-executor';
-import { generateDBOSTestConfig, setUpDBOSTestSysDb } from './helpers';
+import {
+  connectToDBOSTestSystemDatabase,
+  DBOSTestSystemDatabaseClient,
+  generateDBOSTestConfig,
+  setUpDBOSTestSysDb,
+} from './helpers';
 
 const QUEUE = 'enqueue-with-options-queue';
 
 describe('enqueue-workflow-with-options', () => {
   let config: DBOSConfig;
-  let client: Client;
+  let client: DBOSTestSystemDatabaseClient;
 
   beforeEach(async () => {
     config = generateDBOSTestConfig();
     config.name = 'enqueue-options-app';
     await setUpDBOSTestSysDb(config);
     DBOS.setConfig(config);
-    client = new Client({ connectionString: config.systemDatabaseUrl });
-    await client.connect();
+    client = await connectToDBOSTestSystemDatabase(config);
   });
 
   afterEach(async () => {

@@ -5,6 +5,7 @@ on:
 
 jobs:
   publish:
+    if: github.repository == 'dbos-inc/dbos-transact-ts'
     runs-on: ubuntu-latest
     permissions:
       contents: read

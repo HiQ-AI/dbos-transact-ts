@@ -27,6 +27,14 @@ Go DBOS and TypeScript DBOS histories are not interchangeable. Do not point this
 
 Validation is in progress. No application engine has been replaced. Build, lint, package checks, SQLite and PostgreSQL tests, real process recovery and target-runtime checks are separate gates. A successful merge is not application acceptance.
 
+Local evidence on 2026-09-10:
+
+- Build, ESLint and package export/type checks pass.
+- SQLite: 21 dedicated tests plus 293 tests across core workflows, management, client, application scoping, recovery, patching, streams, serialization, outcome ownership, batch enqueue, attributes and versions pass. Backend-specific skips are retained; this is not the complete upstream suite.
+- PostgreSQL: targeted workflow, queue, client and management suites pass after fixing a timestamp-tie-dependent pagination fixture. No production timestamp changes or artificial delays are used.
+- Electron 40.8.5 / Node 24.14.0, run as a separate test process, loads `node:sqlite` and completes a real SDK workflow. This does not verify a packaged desktop application or Windows.
+- CI matrix is pending. Do not mark the candidate release-ready until applicable checks pass.
+
 Upstream namespace publication is disabled for forks. Consume only an immutable verified downstream artifact, not an unbuilt branch or a mutable replacement for the upstream npm package. No automatic desktop release is authorized by this integration.
 
 Keep application-specific experts, prompts and customer materials out of this public SDK fork.

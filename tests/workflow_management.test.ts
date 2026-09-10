@@ -197,6 +197,15 @@ describe('workflow-management-tests', () => {
       workflowIDs.push(wfid);
     }
 
+    // Pagination sorts by created_at, not insertion order; real executions can share a millisecond.
+    const firstCreatedAt = Date.now() - workflowIDs.length;
+    for (let i = 0; i < workflowIDs.length; i++) {
+      await systemDBClient.query('UPDATE dbos.workflow_status SET created_at = $1 WHERE workflow_uuid = $2', [
+        firstCreatedAt + i,
+        workflowIDs[i],
+      ]);
+    }
+
     workflows = await DBOS.listWorkflows(input);
     expect(workflows.length).toBe(10);
     for (let i = 0; i < 10; i++) {

@@ -21,7 +21,7 @@ import {
   registerDataSource,
   replayRecordedStep,
 } from '../src/datasource';
-import { generateDBOSTestConfig, setUpDBOSTestSysDb } from './helpers';
+import { generateDBOSTestConfig, getPostgresTestUrl, setUpDBOSTestSysDb, usingSQLite } from './helpers';
 import { AsyncLocalStorage } from 'async_hooks';
 import { DBOSNotAuthorizedError, DBOSInvalidWorkflowTransitionError } from '../src/error';
 import { sleepms } from '../src/utils';
@@ -384,7 +384,9 @@ async function wfFunctionGuts() {
 const wfFunction = DBOS.registerWorkflow(wfFunctionGuts, { name: 'workflow' });
 
 // Intentionally initialize DS after we've already tried to register a transaction to it
-const dsa = new DBOSKnexDS('knexA', { connectionString: config.systemDatabaseUrl });
+// Application transactions remain PostgreSQL-backed even when workflow checkpoints use SQLite.
+const applicationDatabaseUrl = usingSQLite() ? getPostgresTestUrl() : config.systemDatabaseUrl;
+const dsa = new DBOSKnexDS('knexA', { connectionString: applicationDatabaseUrl });
 
 // Decoratory example
 class DBWFI {
@@ -536,7 +538,7 @@ class ProbeTransactionHandler implements DataSourceTransactionHandler {
   #poolField: Pool | undefined;
 
   async initialize(): Promise<void> {
-    this.#poolField = new Pool({ connectionString: config.systemDatabaseUrl });
+    this.#poolField = new Pool({ connectionString: applicationDatabaseUrl });
     await this.#poolField.query(createTransactionCompletionSchemaPG());
     await this.#poolField.query(createTransactionCompletionTablePG());
   }
@@ -624,7 +626,7 @@ async function raceTransaction(): Promise<string> {
   const workflowID = DBOS.workflowID!;
   const stepID = DBOS.stepID!;
 
-  const winner = new Client({ connectionString: config.systemDatabaseUrl });
+  const winner = new Client({ connectionString: applicationDatabaseUrl });
   try {
     await winner.connect();
     await winner.query(

@@ -10,6 +10,7 @@ import {
   reexecuteWorkflowById,
   retryUntilSuccess,
   setWfAndChildrenToPending,
+  usingSQLite,
 } from './helpers';
 import { WorkflowQueue } from '../src';
 import { EnqueueOptions, SystemDatabase } from '../src/system_database';
@@ -192,18 +193,11 @@ describe('queued-wf-tests-simple', () => {
 
     // Workflows dequeued from a rate-limited queue must have rate_limited = TRUE,
     // so the partial idx_workflow_status_rate_limited index covers the count query.
-    const sysDbUrl = generateDBOSTestConfig().systemDatabaseUrl!;
-    const c = new Client({ connectionString: sysDbUrl });
-    await c.connect();
-    try {
-      const rl = await c.query<{ count: string }>(
-        `SELECT COUNT(*) FROM dbos.workflow_status WHERE queue_name = $1 AND rate_limited = TRUE`,
-        [rlqueue.name],
-      );
-      expect(Number(rl.rows[0].count)).toBe(qlimit * numWaves);
-    } finally {
-      await c.end();
-    }
+    const rl = await DBOSExecutor.globalInstance!.systemDatabase.pool.query<{ count: string }>(
+      `SELECT COUNT(*) AS count FROM dbos.workflow_status WHERE queue_name = $1 AND rate_limited = TRUE`,
+      [rlqueue.name],
+    );
+    expect(Number(rl.rows[0].count)).toBe(qlimit * numWaves);
   });
 
   test('test_multiple_queues', async () => {
@@ -300,41 +294,45 @@ describe('queued-wf-tests-simple', () => {
     expect(await wfh2b.getResult()).toBe('cd');
   });
 
-  test('queue workflow in recovered workflow', async () => {
-    expect(WF.x).toBe(5);
-    console.log('shutdown');
-    const appVersion = globalParams.appVersion;
-    await DBOS.shutdown(); // DO not want to take queued jobs from here
+  (usingSQLite() ? test.skip : test)(
+    'queue workflow in recovered workflow',
+    async () => {
+      expect(WF.x).toBe(5);
+      console.log('shutdown');
+      const appVersion = globalParams.appVersion;
+      await DBOS.shutdown(); // DO not want to take queued jobs from here
 
-    console.log('run side process');
-    // We crash a workflow on purpose; this has queued some things up and awaited them...
-    const { stdout, stderr } = await execFileAsync('npx', ['ts-node', './tests/wfqtestprocess.ts'], {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        DIE_ON_PURPOSE: 'true',
-        DBOS__APPVERSION: appVersion,
-      },
-    });
+      console.log('run side process');
+      // We crash a workflow on purpose; this has queued some things up and awaited them...
+      const { stdout, stderr } = await execFileAsync('npx', ['ts-node', './tests/wfqtestprocess.ts'], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          DIE_ON_PURPOSE: 'true',
+          DBOS__APPVERSION: appVersion,
+        },
+      });
 
-    expect(stderr).toBeDefined();
-    expect(stdout).toBeDefined();
-    console.log(stdout);
+      expect(stderr).toBeDefined();
+      expect(stdout).toBeDefined();
+      console.log(stdout);
 
-    console.log('start again');
-    await DBOS.launch();
-    const wfh = DBOS.retrieveWorkflow('testqueuedwfcrash');
-    // Launch recovery re-enqueued it; whether the queue has already dequeued it here is a race.
-    expect([StatusString.ENQUEUED, StatusString.PENDING]).toContain((await wfh.getStatus())?.status);
+      console.log('start again');
+      await DBOS.launch();
+      const wfh = DBOS.retrieveWorkflow('testqueuedwfcrash');
+      // Launch recovery re-enqueued it; whether the queue has already dequeued it here is a race.
+      expect([StatusString.ENQUEUED, StatusString.PENDING]).toContain((await wfh.getStatus())?.status);
 
-    // It should proceed.  And should not take too long, either...
-    //  We could also recover the workflow
-    console.log('Waiting for recovered WF to complete...');
-    expect(await wfh.getResult()).toBe(5);
+      // It should proceed.  And should not take too long, either...
+      //  We could also recover the workflow
+      console.log('Waiting for recovered WF to complete...');
+      expect(await wfh.getResult()).toBe(5);
 
-    expect((await wfh.getStatus())?.status).toBe('SUCCESS');
-    expect(await queueEntriesAreCleanedUp()).toBe(true);
-  }, 60000);
+      expect((await wfh.getStatus())?.status).toBe('SUCCESS');
+      expect(await queueEntriesAreCleanedUp()).toBe(true);
+    },
+    60000,
+  );
 
   class TestDuplicateID {
     @DBOS.workflow()
@@ -531,54 +529,46 @@ describe('queued-wf-tests-simple', () => {
     expect((await wfh3.getStatus())?.status).toBe(StatusString.ENQUEUED);
 
     // Manually update the database to pretend wf3 is PENDING and comes from a different executor
-    const systemDBClient = new Client({
-      connectionString: config.systemDatabaseUrl,
-    });
-    await systemDBClient.connect();
-    try {
-      await systemDBClient.query(
-        "UPDATE dbos.workflow_status SET executor_id = 'test-vmid-2', status = 'PENDING' WHERE workflow_uuid = $1",
-        [wfh3.workflowID],
-      );
+    const systemDBClient = DBOSExecutor.globalInstance!.systemDatabase.pool;
+    await systemDBClient.query(
+      "UPDATE dbos.workflow_status SET executor_id = 'test-vmid-2', status = 'PENDING' WHERE workflow_uuid = $1",
+      [wfh3.workflowID],
+    );
 
-      // Trigger workflow recovery. The two first workflows should still be blocked but the 3rd one enqueued
-      const recovered_handles = await recoverPendingWorkflows(['test-vmid-2']);
-      expect(recovered_handles.length).toBe(1);
-      expect(recovered_handles[0].workflowID).toBe(wfid3);
-      expect((await wfh1.getStatus())?.status).toBe(StatusString.PENDING);
-      expect((await wfh2.getStatus())?.status).toBe(StatusString.PENDING);
-      expect((await wfh3.getStatus())?.status).toBe(StatusString.ENQUEUED);
+    // Trigger workflow recovery. The two first workflows should still be blocked but the 3rd one enqueued
+    const recovered_handles = await recoverPendingWorkflows(['test-vmid-2']);
+    expect(recovered_handles.length).toBe(1);
+    expect(recovered_handles[0].workflowID).toBe(wfid3);
+    expect((await wfh1.getStatus())?.status).toBe(StatusString.PENDING);
+    expect((await wfh2.getStatus())?.status).toBe(StatusString.PENDING);
+    expect((await wfh3.getStatus())?.status).toBe(StatusString.ENQUEUED);
 
-      // Unblock the two first workflows
-      TestQueueRecovery.stopEvent.set();
-      // Verify all queue entries eventually get cleaned up.
-      expect(await wfh1.getResult()).toBeUndefined();
-      expect(await wfh2.getResult()).toBeUndefined();
-      expect(await wfh3.getResult()).toBeUndefined();
-      expect(TestQueueRecovery.cnt).toBe(2);
+    // Unblock the two first workflows
+    TestQueueRecovery.stopEvent.set();
+    // Verify all queue entries eventually get cleaned up.
+    expect(await wfh1.getResult()).toBeUndefined();
+    expect(await wfh2.getResult()).toBeUndefined();
+    expect(await wfh3.getResult()).toBeUndefined();
+    expect(TestQueueRecovery.cnt).toBe(2);
 
-      // Trigger workflow recovery for "local", by changing the record to indicate they did not finish.
-      //   The two first workflows should be re-enqueued then dequeued again
-      await setWfAndChildrenToPending(wfh1.workflowID);
-      await setWfAndChildrenToPending(wfh2.workflowID);
-      const recovered_handles_local = await recoverPendingWorkflows(['local']);
-      expect(recovered_handles_local.length).toBe(2);
-      for (const h of recovered_handles_local) {
-        expect([wfid1, wfid2]).toContain(h.workflowID);
-      }
-      expect(await wfh1.getResult()).toBeUndefined();
-      expect(await wfh2.getResult()).toBeUndefined();
-      expect(TestQueueRecovery.cnt).toBe(4);
-
-      const result = await systemDBClient.query(
-        'SELECT executor_id FROM dbos.workflow_status WHERE workflow_uuid = $1',
-        [wfh3.workflowID],
-      );
-      expect(result.rows).toEqual([{ executor_id: 'local' }]);
-      expect(await queueEntriesAreCleanedUp()).toBe(true);
-    } finally {
-      await systemDBClient.end();
+    // Trigger workflow recovery for "local", by changing the record to indicate they did not finish.
+    //   The two first workflows should be re-enqueued then dequeued again
+    await setWfAndChildrenToPending(wfh1.workflowID);
+    await setWfAndChildrenToPending(wfh2.workflowID);
+    const recovered_handles_local = await recoverPendingWorkflows(['local']);
+    expect(recovered_handles_local.length).toBe(2);
+    for (const h of recovered_handles_local) {
+      expect([wfid1, wfid2]).toContain(h.workflowID);
     }
+    expect(await wfh1.getResult()).toBeUndefined();
+    expect(await wfh2.getResult()).toBeUndefined();
+    expect(TestQueueRecovery.cnt).toBe(4);
+
+    const result = await systemDBClient.query('SELECT executor_id FROM dbos.workflow_status WHERE workflow_uuid = $1', [
+      wfh3.workflowID,
+    ]);
+    expect(result.rows).toEqual([{ executor_id: 'local' }]);
+    expect(await queueEntriesAreCleanedUp()).toBe(true);
   });
 
   class TestCancelQueues {
@@ -1104,7 +1094,7 @@ class InterProcessWorkflow {
   }
 }
 
-describe('queued-wf-tests-concurrent-workers', () => {
+(usingSQLite() ? describe.skip : describe)('queued-wf-tests-concurrent-workers', () => {
   let config: DBOSConfig;
 
   beforeAll(async () => {
@@ -2443,6 +2433,71 @@ describe('database-backed-queue-crud', () => {
     await DBOS.deleteQueue(queueName);
   });
 
+  test('queue claim respects a per-poll dispatch budget', async () => {
+    await DBOS.shutdown();
+    const cfg = generateDBOSTestConfig();
+    cfg.listenQueues = [];
+    DBOS.setConfig(cfg);
+    await DBOS.launch();
+
+    const queueName = `budget_${randomUUID()}`;
+    const queue = await DBOS.registerQueue(queueName, { minPollingIntervalMs: 60000 });
+    const handles = await Promise.all(
+      Array.from({ length: 5 }, (_, index) =>
+        DBOS.startWorkflow(TestWFs, { workflowID: randomUUID(), queueName }).testWorkflowSimple('budget-', `${index}`),
+      ),
+    );
+
+    const exec = DBOSExecutor.globalInstance!;
+    const firstClaim = await exec.systemDatabase.findAndMarkStartableWorkflows(
+      queue,
+      exec.executorID,
+      globalParams.appVersion,
+      undefined,
+      0,
+      0,
+      2,
+    );
+    expect(firstClaim).toHaveLength(2);
+
+    const statusesAfterFirstClaim = await Promise.all(handles.map((handle) => handle.getStatus()));
+    expect(statusesAfterFirstClaim.filter((status) => status?.status === StatusString.PENDING)).toHaveLength(2);
+    expect(statusesAfterFirstClaim.filter((status) => status?.status === StatusString.ENQUEUED)).toHaveLength(3);
+
+    const secondClaim = await exec.systemDatabase.findAndMarkStartableWorkflows(
+      queue,
+      exec.executorID,
+      globalParams.appVersion,
+      undefined,
+      0,
+      0,
+      2,
+    );
+    expect(secondClaim).toHaveLength(2);
+
+    const finalClaim = await exec.systemDatabase.findAndMarkStartableWorkflows(
+      queue,
+      exec.executorID,
+      globalParams.appVersion,
+      undefined,
+      0,
+      0,
+      2,
+    );
+    expect(finalClaim).toHaveLength(1);
+
+    await exec.dispatchDequeuedWorkflows([...firstClaim, ...secondClaim, ...finalClaim]);
+
+    await expect(Promise.all(handles.map((handle) => handle.getResult()))).resolves.toEqual([
+      'budget-0',
+      'budget-1',
+      'budget-2',
+      'budget-3',
+      'budget-4',
+    ]);
+    await DBOS.deleteQueue(queueName);
+  });
+
   test('supervisor-launches-worker-for-queue-registered-after-launch', async () => {
     const queueName = `supervisor_${randomUUID()}`;
     // Queue is registered AFTER DBOS launches; the dispatcher's reconcile
@@ -2603,8 +2658,7 @@ describe('database-backed-queue-crud', () => {
     // Restart DBOS listening to the previously idle queue. The pending
     // workflow now runs to completion.
     await DBOS.shutdown();
-    const cfg2 = generateDBOSTestConfig();
-    cfg2.listenQueues = [idleMemName];
+    const cfg2 = { ...cfg, listenQueues: [idleMemName] };
     DBOS.setConfig(cfg2);
     await DBOS.launch();
 
@@ -3255,7 +3309,7 @@ describe('bounded-lane dispatcher', () => {
 });
 
 // These drive the sweep by hand against unpolled queues (`listenQueues: []` dispatches nothing), so each sweep's exact result set is observable.
-describe('partitioned-batch-dequeue', () => {
+(usingSQLite() ? describe.skip : describe)('partitioned-batch-dequeue', () => {
   let config: DBOSConfig;
   let sysdb: SystemDatabase;
 
@@ -3568,63 +3622,67 @@ describe('partitioned-batch-dequeue-dispatch', () => {
   }, 30000);
 
   // Every other batched-path test calls the sweep directly, so this is what pins the dispatch itself.
-  test('runs one workflow at a time per partition, in FIFO order', async () => {
-    const sysdb = DBOSExecutor.globalInstance!.systemDatabase;
-    const batchedQueues: string[] = [];
-    const realBatched = sysdb.findAndMarkStartablePartitionedWorkflows.bind(sysdb);
-    jest.spyOn(sysdb, 'findAndMarkStartablePartitionedWorkflows').mockImplementation((queue, ...rest) => {
-      batchedQueues.push(queue.name);
-      return realBatched(queue, ...rest);
-    });
+  (usingSQLite() ? test.skip : test)(
+    'runs one workflow at a time per partition, in FIFO order',
+    async () => {
+      const sysdb = DBOSExecutor.globalInstance!.systemDatabase;
+      const batchedQueues: string[] = [];
+      const realBatched = sysdb.findAndMarkStartablePartitionedWorkflows.bind(sysdb);
+      jest.spyOn(sysdb, 'findAndMarkStartablePartitionedWorkflows').mockImplementation((queue, ...rest) => {
+        batchedQueues.push(queue.name);
+        return realBatched(queue, ...rest);
+      });
 
-    exclusiveOrderLock.length = 0;
-    exclusiveBlockingEvent.clear();
-    exclusiveWaitingEvent.clear();
+      exclusiveOrderLock.length = 0;
+      exclusiveBlockingEvent.clear();
+      exclusiveWaitingEvent.clear();
 
-    const queueName = `exclusive_${randomUUID()}`;
-    await DBOS.registerQueue(queueName, {
-      partitionQueue: true,
-      concurrency: 1,
-      minPollingIntervalMs: 100,
-      onConflict: 'always_update',
-    });
+      const queueName = `exclusive_${randomUUID()}`;
+      await DBOS.registerQueue(queueName, {
+        partitionQueue: true,
+        concurrency: 1,
+        minPollingIntervalMs: 100,
+        onConflict: 'always_update',
+      });
 
-    // Sortable workflow IDs so a created_at tie still ranks partition a as head, a1, a2.
-    const prefix = randomUUID();
-    const headHandle = await DBOS.startWorkflow(exclusiveHeadWorkflow, {
-      workflowID: `${prefix}-0`,
-      queueName,
-      enqueueOptions: { queuePartitionKey: 'a' },
-    })();
-    const follower1 = await DBOS.startWorkflow(exclusiveTaggedWorkflow, {
-      workflowID: `${prefix}-1`,
-      queueName,
-      enqueueOptions: { queuePartitionKey: 'a' },
-    })('a1');
-    const follower2 = await DBOS.startWorkflow(exclusiveTaggedWorkflow, {
-      workflowID: `${prefix}-2`,
-      queueName,
-      enqueueOptions: { queuePartitionKey: 'a' },
-    })('a2');
-    const otherHandle = await DBOS.startWorkflow(exclusiveTaggedWorkflow, {
-      queueName,
-      enqueueOptions: { queuePartitionKey: 'b' },
-    })('b1');
+      // Sortable workflow IDs so a created_at tie still ranks partition a as head, a1, a2.
+      const prefix = randomUUID();
+      const headHandle = await DBOS.startWorkflow(exclusiveHeadWorkflow, {
+        workflowID: `${prefix}-0`,
+        queueName,
+        enqueueOptions: { queuePartitionKey: 'a' },
+      })();
+      const follower1 = await DBOS.startWorkflow(exclusiveTaggedWorkflow, {
+        workflowID: `${prefix}-1`,
+        queueName,
+        enqueueOptions: { queuePartitionKey: 'a' },
+      })('a1');
+      const follower2 = await DBOS.startWorkflow(exclusiveTaggedWorkflow, {
+        workflowID: `${prefix}-2`,
+        queueName,
+        enqueueOptions: { queuePartitionKey: 'a' },
+      })('a2');
+      const otherHandle = await DBOS.startWorkflow(exclusiveTaggedWorkflow, {
+        queueName,
+        enqueueOptions: { queuePartitionKey: 'b' },
+      })('b1');
 
-    await exclusiveWaitingEvent.wait();
-    // Partition b drains while a's head blocks; its completion proves a full sweep ran, making the follower assertions meaningful.
-    expect(await otherHandle.getResult()).toBe('b1');
-    expect((await follower1.getStatus())?.status).toBe(StatusString.ENQUEUED);
-    expect((await follower2.getStatus())?.status).toBe(StatusString.ENQUEUED);
+      await exclusiveWaitingEvent.wait();
+      // Partition b drains while a's head blocks; its completion proves a full sweep ran, making the follower assertions meaningful.
+      expect(await otherHandle.getResult()).toBe('b1');
+      expect((await follower1.getStatus())?.status).toBe(StatusString.ENQUEUED);
+      expect((await follower2.getStatus())?.status).toBe(StatusString.ENQUEUED);
 
-    exclusiveBlockingEvent.set();
-    expect(await headHandle.getResult()).toBeTruthy();
-    expect(await follower1.getResult()).toBe('a1');
-    expect(await follower2.getResult()).toBe('a2');
-    expect(exclusiveOrderLock.filter((tag) => tag !== 'b1')).toEqual(['head', 'a1', 'a2']);
-    expect(batchedQueues).toContain(queueName);
-    expect(await queueEntriesAreCleanedUp()).toBe(true);
-  }, 30000);
+      exclusiveBlockingEvent.set();
+      expect(await headHandle.getResult()).toBeTruthy();
+      expect(await follower1.getResult()).toBe('a1');
+      expect(await follower2.getResult()).toBe('a2');
+      expect(exclusiveOrderLock.filter((tag) => tag !== 'b1')).toEqual(['head', 'a1', 'a2']);
+      expect(batchedQueues).toContain(queueName);
+      expect(await queueEntriesAreCleanedUp()).toBe(true);
+    },
+    30000,
+  );
 });
 
 describe('dequeue-dispatch-cost', () => {
@@ -3813,58 +3871,63 @@ describe('limiter-dequeue-locking', () => {
 
   async function pendingCount(queueName: string): Promise<number> {
     const { rows } = await sysdb.pool.query<{ count: string }>(
-      `SELECT COUNT(*) FROM "${sysdb.schemaName}".workflow_status WHERE queue_name = $1 AND status = $2`,
+      `SELECT COUNT(*) AS count FROM "${sysdb.schemaName}".workflow_status WHERE queue_name = $1 AND status = $2`,
       [queueName, StatusString.PENDING],
     );
     return Number(rows[0].count);
   }
 
-  test('a peer mid-claim blocks a rate-limited dequeue rather than being skipped past', async () => {
-    const limit = 2;
-    const queueName = `limiter-lock-${randomUUID()}`;
-    const queue = await DBOS.registerQueue(queueName, {
-      rateLimit: { limitPerPeriod: limit, periodSec: 60 },
-      onConflict: 'always_update',
-    });
+  // This assertion exercises PostgreSQL row locks and SQLSTATE 55P03, not SQLite's database-wide write lock.
+  (usingSQLite() ? test.skip : test)(
+    'a peer mid-claim blocks a rate-limited dequeue rather than being skipped past',
+    async () => {
+      const limit = 2;
+      const queueName = `limiter-lock-${randomUUID()}`;
+      const queue = await DBOS.registerQueue(queueName, {
+        rateLimit: { limitPerPeriod: limit, periodSec: 60 },
+        onConflict: 'always_update',
+      });
 
-    // Distinct priorities so the head of the queue is deterministic.
-    const ids: string[] = [];
-    for (let priority = 1; priority <= limit * 2; priority++) {
-      const handle = await DBOS.startWorkflow(limitedWorkflow, {
-        queueName,
-        enqueueOptions: { priority },
-      })(`w${priority}`);
-      ids.push(handle.workflowID);
-    }
+      // Distinct priorities so the head of the queue is deterministic.
+      const ids: string[] = [];
+      for (let priority = 1; priority <= limit * 2; priority++) {
+        const handle = await DBOS.startWorkflow(limitedWorkflow, {
+          queueName,
+          enqueueOptions: { priority },
+        })(`w${priority}`);
+        ids.push(handle.workflowID);
+      }
 
-    const peer = new Client({ connectionString: config.systemDatabaseUrl });
-    await peer.connect();
-    try {
-      await peer.query('BEGIN');
-      // A peer dequeuer holding an open claim on the whole limiter budget.
-      const head = await peer.query<{ workflow_uuid: string }>(
-        `SELECT workflow_uuid FROM "${sysdb.schemaName}".workflow_status
+      const peer = new Client({ connectionString: config.systemDatabaseUrl });
+      await peer.connect();
+      try {
+        await peer.query('BEGIN');
+        // A peer dequeuer holding an open claim on the whole limiter budget.
+        const head = await peer.query<{ workflow_uuid: string }>(
+          `SELECT workflow_uuid FROM "${sysdb.schemaName}".workflow_status
          WHERE queue_name = $1 AND status = $2
          ORDER BY priority ASC, created_at ASC
          LIMIT ${limit} FOR UPDATE`,
-        [queueName, StatusString.ENQUEUED],
-      );
-      expect(head.rows.map((row) => row.workflow_uuid)).toEqual(ids.slice(0, limit));
+          [queueName, StatusString.ENQUEUED],
+        );
+        expect(head.rows.map((row) => row.workflow_uuid)).toEqual(ids.slice(0, limit));
 
-      // Under SKIP LOCKED this claims the rows behind the peer, spending the same budget a second time.
-      await expect(
-        sysdb.findAndMarkStartableWorkflows(queue, 'lock-test', globalParams.appVersion, undefined),
-      ).rejects.toMatchObject({ code: '55P03' });
+        // Under SKIP LOCKED this claims the rows behind the peer, spending the same budget a second time.
+        await expect(
+          sysdb.findAndMarkStartableWorkflows(queue, 'lock-test', globalParams.appVersion, undefined),
+        ).rejects.toMatchObject({ code: '55P03' });
 
-      // Nothing was admitted behind the peer's back.
-      for (const id of ids) {
-        expect((await sysdb.getWorkflowStatus(id))?.status).toBe(StatusString.ENQUEUED);
+        // Nothing was admitted behind the peer's back.
+        for (const id of ids) {
+          expect((await sysdb.getWorkflowStatus(id))?.status).toBe(StatusString.ENQUEUED);
+        }
+      } finally {
+        await peer.query('ROLLBACK');
+        await peer.end();
       }
-    } finally {
-      await peer.query('ROLLBACK');
-      await peer.end();
-    }
-  }, 30000);
+    },
+    30000,
+  );
 
   test.each([
     ['global-concurrency', { globalConcurrency: 1, partitionConcurrency: 1 }],

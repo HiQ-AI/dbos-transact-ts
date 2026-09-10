@@ -1,5 +1,5 @@
 import { DBOS } from '../src/';
-import { generateDBOSTestConfig, reexecuteWorkflowById, setUpDBOSTestSysDb } from './helpers';
+import { generateDBOSTestConfig, reexecuteWorkflowById, setUpDBOSTestSysDb, usingSQLite } from './helpers';
 import { DBOSConfig, DBOSExecutor } from '../src/dbos-executor';
 import { PortableWorkflowError } from '../schemas/system_db_schema';
 import { randomUUID } from 'node:crypto';
@@ -456,9 +456,9 @@ describe('dbos-streaming-tests', () => {
   });
 
   test('stream-low-latency-delivery', async () => {
-    // Values should reach a blocked reader promptly via LISTEN/NOTIFY rather than
-    // after a fixed polling interval. Each value carries the wall-clock time it was
-    // written; the reader asserts it received the value shortly after.
+    // PostgreSQL delivers via LISTEN/NOTIFY; SQLite needs an explicit polling budget
+    // for the same latency target. Each value carries its write time so both paths
+    // must deliver every value promptly rather than merely finish the stream.
     const streamKey = 'latency_stream';
     const numValues = 3;
 
@@ -487,14 +487,15 @@ describe('dbos-streaming-tests', () => {
 
     await DBOS.launch();
 
-    // In-process DBOS reader: woken by LISTEN/NOTIFY, so delivery is single-digit
-    // milliseconds. A 1s polling fallback would average ~0.5s and frequently exceed
-    // this across several values.
+    // Leave PostgreSQL's default polling interval unchanged to exercise notifications.
+    // SQLite has no LISTEN/NOTIFY: its default 1s polling cannot promise <500ms.
     const wfid = randomUUID();
     const handle = await DBOS.withNextWorkflowID(wfid, async () => {
       return DBOS.startWorkflow(writerWorkflow, {})();
     });
-    const notifyResult = await measure(DBOS.readStream(wfid, streamKey));
+    const notifyResult = await measure(
+      DBOS.readStream(wfid, streamKey, usingSQLite() ? { pollingIntervalMs: 50 } : undefined),
+    );
     await handle.getResult();
     expect(notifyResult.count).toBe(numValues);
     expect(notifyResult.maxLatency).toBeLessThan(500);
@@ -730,7 +731,7 @@ describe('dbos-streaming-tests', () => {
     await expect(gen.next()).rejects.toThrow(DBOSNonExistentWorkflowError);
   });
 
-  test('stream-trigger-dropped-notifier-delivers', async () => {
+  (usingSQLite() ? test.skip : test)('stream-trigger-dropped-notifier-delivers', async () => {
     // The per-row NOTIFY trigger is dropped; assert it's gone and that the coalescing notifier still wakes a blocked reader well under the 1s poll.
     const streamKey = 'notifier_stream';
     const numValues = 3;
@@ -822,7 +823,7 @@ describe('dbos-streaming-tests', () => {
     expect(joined.length).toBe(n + 1);
   });
 
-  test('stream-notifier-drops-unsendable-payload', async () => {
+  (usingSQLite() ? test.skip : test)('stream-notifier-drops-unsendable-payload', async () => {
     // A rejected batch (e.g. a payload over the 8000-byte limit) is dropped, not requeued, so a poison payload can't permanently stall the notifier.
     await DBOS.launch();
     const sysdb = DBOSExecutor.globalInstance!.systemDatabase;
@@ -867,7 +868,7 @@ describe('dbos-streaming-tests', () => {
     }
   });
 
-  test('stream-notifier-survives-flush-error', async () => {
+  (usingSQLite() ? test.skip : test)('stream-notifier-survives-flush-error', async () => {
     // An exception escaping a flush must not kill the notifier loop; it logs, backs off, and resumes delivering.
     await DBOS.launch();
     const sysdb = DBOSExecutor.globalInstance!.systemDatabase;
@@ -919,7 +920,7 @@ describe('dbos-streaming-tests', () => {
     }
   });
 
-  test('event-notifier-delivers-without-workflow-events-trigger', async () => {
+  (usingSQLite() ? test.skip : test)('event-notifier-delivers-without-workflow-events-trigger', async () => {
     // The per-row workflow_events trigger is dropped; assert it's gone and that the coalescing notifier still wakes a blocked getEvent well under the 10s event poll.
     const key = 'notifier_event';
 
@@ -959,7 +960,7 @@ describe('dbos-streaming-tests', () => {
     expect(latency).toBeLessThan(3000);
   });
 
-  test('message-notifications-trigger-is-kept', async () => {
+  (usingSQLite() ? test.skip : test)('message-notifications-trigger-is-kept', async () => {
     // Messages keep their in-transaction NOTIFY trigger (they can be sent from processes with no notifier to buffer them); assert it exists and that send still wakes a blocked recv.
     const recvWorkflow = DBOS.registerWorkflow(
       async () => {

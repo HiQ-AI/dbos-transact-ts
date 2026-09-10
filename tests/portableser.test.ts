@@ -1,4 +1,4 @@
-import { Client } from 'pg';
+import { Pool } from 'pg';
 import { DBOS, DBOSClient, DBOSConfig, DBOSSerializer, WorkflowHandle } from '../src';
 import { generateDBOSTestConfig, reexecuteWorkflowById, setUpDBOSTestSysDb } from './helpers';
 import {
@@ -185,7 +185,7 @@ const portableRecvWF = DBOS.registerWorkflow(
 
 describe('portable-serizlization-tests', () => {
   let config: DBOSConfig;
-  let systemDBClient: Client;
+  let systemDBClient: Pool;
 
   beforeAll(() => {
     config = generateDBOSTestConfig();
@@ -198,14 +198,10 @@ describe('portable-serizlization-tests', () => {
     await DBOS.launch();
     await DBOS.registerQueue('testq', { onConflict: 'always_update' });
 
-    systemDBClient = new Client({
-      connectionString: config.systemDatabaseUrl,
-    });
-    await systemDBClient.connect();
+    systemDBClient = DBOSExecutor.globalInstance!.systemDatabase.pool;
   });
 
   afterEach(async () => {
-    await systemDBClient.end();
     await DBOS.shutdown();
     process.env.DBOS__APPVERSION = undefined;
   });
@@ -872,16 +868,13 @@ describe('custom-serializer-restart-tests', () => {
   };
 
   let config: DBOSConfig;
-  let systemDBClient: Client;
+  let systemDBClient: Pool;
 
   beforeAll(() => {
     config = generateDBOSTestConfig();
   });
 
   afterEach(async () => {
-    if (systemDBClient) {
-      await systemDBClient.end();
-    }
     await DBOS.shutdown();
   });
 
@@ -893,8 +886,7 @@ describe('custom-serializer-restart-tests', () => {
     DBOS.setConfig(config);
     await DBOS.launch();
 
-    systemDBClient = new Client({ connectionString: config.systemDatabaseUrl });
-    await systemDBClient.connect();
+    systemDBClient = DBOSExecutor.globalInstance!.systemDatabase.pool;
 
     const p1Handle = await DBOS.startWorkflow(custSerWorkflow)('hello');
     expect(await p1Handle.getResult()).toBe('result:hello');
@@ -916,6 +908,7 @@ describe('custom-serializer-restart-tests', () => {
     config.serializer = base64Serializer;
     DBOS.setConfig(config);
     await DBOS.launch();
+    systemDBClient = DBOSExecutor.globalInstance!.systemDatabase.pool;
 
     // Old data (js_superjson) should still be readable via DBOS API
     expect(await DBOS.retrieveWorkflow(p1Handle.workflowID).getResult()).toBe('result:hello');
@@ -965,8 +958,7 @@ describe('custom-serializer-restart-tests', () => {
     DBOS.setConfig(config);
     await DBOS.launch();
 
-    systemDBClient = new Client({ connectionString: config.systemDatabaseUrl });
-    await systemDBClient.connect();
+    systemDBClient = DBOSExecutor.globalInstance!.systemDatabase.pool;
 
     // Insert a default-format (js_superjson) workflow directly for comparison,
     // since we can't run both serializers in one launch
@@ -1006,6 +998,7 @@ describe('custom-serializer-restart-tests', () => {
     config.serializer = undefined;
     DBOS.setConfig(config);
     await DBOS.launch();
+    systemDBClient = DBOSExecutor.globalInstance!.systemDatabase.pool;
 
     // Default-format data should still be readable
     expect(await DBOS.retrieveWorkflow(defaultWfId).getResult()).toBe('result:default');
@@ -1065,8 +1058,7 @@ describe('custom-serializer-restart-tests', () => {
     DBOS.setConfig(config);
     await DBOS.launch();
 
-    systemDBClient = new Client({ connectionString: config.systemDatabaseUrl });
-    await systemDBClient.connect();
+    systemDBClient = DBOSExecutor.globalInstance!.systemDatabase.pool;
 
     // --- getEvent path ---
     const setter = await DBOS.startWorkflow(portableEventSetterWF)('event-payload');
@@ -1173,7 +1165,7 @@ describe('async-serializer-tests', () => {
   };
 
   let config: DBOSConfig;
-  let systemDBClient: Client;
+  let systemDBClient: Pool;
 
   beforeAll(() => {
     config = generateDBOSTestConfig();
@@ -1185,9 +1177,6 @@ describe('async-serializer-tests', () => {
   });
 
   afterEach(async () => {
-    if (systemDBClient) {
-      await systemDBClient.end();
-    }
     await DBOS.shutdown();
   });
 
@@ -1197,8 +1186,7 @@ describe('async-serializer-tests', () => {
     DBOS.setConfig(config);
     await DBOS.launch();
 
-    systemDBClient = new Client({ connectionString: config.systemDatabaseUrl });
-    await systemDBClient.connect();
+    systemDBClient = DBOSExecutor.globalInstance!.systemDatabase.pool;
 
     // Start a receiver, then run a sender that setEvents and sends to the receiver.
     const receiver = await DBOS.startWorkflow(asyncRecvWorkflow)();

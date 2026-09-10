@@ -8,6 +8,7 @@ import {
 import type { QueueRecord, SystemDatabase } from './system_database';
 import type { GlobalLogger } from './telemetry/logs';
 import { globalParams, INTERNAL_QUEUE_NAME } from './utils';
+import { isSQLiteSystemDatabaseUrl } from './sqlite_system_database';
 
 /**
  * Log a single queue's name and its set parameters. Unset parameters are
@@ -709,6 +710,7 @@ class WFQueueRunner {
   private static readonly defaultMaxPollingIntervalMs: number = 120000;
   private static readonly reconcileIntervalMs: number = 1000;
   private static readonly transitionIntervalMs: number = 1000;
+  private static readonly maxWorkflowsPerPoll: number = 100;
   private readonly backoffFactor: number = 2.0;
   private readonly scalebackFactor: number = 0.9;
   private readonly jitterMin: number = 0.95;
@@ -995,16 +997,22 @@ class WFQueueRunner {
           globalParams.appVersion,
           undefined,
           sysdb.countRunningWorkflowsForQueue(queue.name),
+          0,
+          WFQueueRunner.maxWorkflowsPerPoll,
         );
         await dispatch(wfids);
       } else if (
         limits.partitionConcurrency === 1 &&
         limits.globalConcurrency === undefined &&
         limits.rateLimit === undefined &&
-        limits.partitionRateLimit === undefined
+        limits.partitionRateLimit === undefined &&
+        !isSQLiteSystemDatabaseUrl(sysdb.systemDatabaseUrl)
       ) {
         // Batched path: one transaction claims every partition's head (see findAndMarkStartablePartitionedWorkflows).
-        const maxTasks = workerBudget(limits, sysdb.countRunningWorkflowsForQueue(queue.name));
+        const maxTasks = Math.min(
+          workerBudget(limits, sysdb.countRunningWorkflowsForQueue(queue.name)),
+          WFQueueRunner.maxWorkflowsPerPoll,
+        );
         if (maxTasks > 0) {
           const wfids = await sysdb.findAndMarkStartablePartitionedWorkflows(
             queue,
@@ -1021,7 +1029,7 @@ class WFQueueRunner {
         const running = sysdb.countRunningWorkflowsForQueue(queue.name);
         let claimed = 0;
         for (const partitionKey of partitionKeys) {
-          if (workerBudget(limits, running + claimed) <= 0) break;
+          if (claimed >= WFQueueRunner.maxWorkflowsPerPoll || workerBudget(limits, running + claimed) <= 0) break;
           let partitionWfids: string[];
           try {
             partitionWfids = await sysdb.findAndMarkStartableWorkflows(
@@ -1031,6 +1039,7 @@ class WFQueueRunner {
               partitionKey,
               running + claimed,
               sysdb.countRunningWorkflowsForPartition(queue.name, partitionKey),
+              WFQueueRunner.maxWorkflowsPerPoll - claimed,
             );
           } catch (e) {
             // Lock held or claim raced by another worker: skip just this partition, no queue-wide backoff.

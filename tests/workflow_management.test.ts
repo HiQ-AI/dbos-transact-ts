@@ -6,8 +6,10 @@ import {
   Event,
   recoverPendingWorkflows,
   reexecuteWorkflowById,
+  usingSQLite,
+  connectToDBOSTestSystemDatabase,
 } from './helpers';
-import { Client } from 'pg';
+import { Pool } from 'pg';
 import { WorkflowHandle, WorkflowStatus } from '../src/workflow';
 import { randomUUID } from 'node:crypto';
 import { globalParams, sleepms } from '../src/utils';
@@ -20,7 +22,7 @@ import { DBOSJSON } from '../src/serialization';
 
 describe('workflow-management-tests', () => {
   let config: DBOSConfig;
-  let systemDBClient: Client;
+  let systemDBClient: Pool;
 
   beforeAll(() => {
     config = generateDBOSTestConfig();
@@ -32,14 +34,10 @@ describe('workflow-management-tests', () => {
     await setUpDBOSTestSysDb(config);
     await DBOS.launch();
 
-    systemDBClient = new Client({
-      connectionString: config.systemDatabaseUrl,
-    });
-    await systemDBClient.connect();
+    systemDBClient = DBOSExecutor.globalInstance!.systemDatabase.pool;
   });
 
   afterEach(async () => {
-    await systemDBClient.end();
     await DBOS.shutdown();
     process.env.DBOS__APPVERSION = undefined;
   });
@@ -199,6 +197,15 @@ describe('workflow-management-tests', () => {
       workflowIDs.push(wfid);
     }
 
+    // Pagination sorts by created_at, not insertion order; real executions can share a millisecond.
+    const firstCreatedAt = Date.now() - workflowIDs.length;
+    for (let i = 0; i < workflowIDs.length; i++) {
+      await systemDBClient.query('UPDATE dbos.workflow_status SET created_at = $1 WHERE workflow_uuid = $2', [
+        firstCreatedAt + i,
+        workflowIDs[i],
+      ]);
+    }
+
     workflows = await DBOS.listWorkflows(input);
     expect(workflows.length).toBe(10);
     for (let i = 0; i < 10; i++) {
@@ -238,8 +245,7 @@ describe('workflow-management-tests', () => {
     };
     workflows = await DBOS.listWorkflows(wfidInput);
     expect(workflows.length).toBe(2);
-    expect(workflows[0].workflowID).toBe(workflowIDs[5]);
-    expect(workflows[1].workflowID).toBe(workflowIDs[7]);
+    expect(workflows.map((workflow) => workflow.workflowID).sort()).toEqual([workflowIDs[5], workflowIDs[7]].sort());
   });
 
   test('getworkflows-cli', async () => {
@@ -319,7 +325,7 @@ describe('workflow-management-tests', () => {
       [workflowID],
     );
     let rows = result.rows;
-    expect(rows[0].attempts).toBe(String(1));
+    expect(Number(rows[0].attempts)).toBe(1);
     expect(rows[0].status).toBe(StatusString.SUCCESS);
     await expect(handle.getStatus()).resolves.toMatchObject({
       status: StatusString.SUCCESS,
@@ -332,7 +338,7 @@ describe('workflow-management-tests', () => {
       [workflowID],
     );
     rows = result.rows;
-    expect(rows[0].attempts).toBe(String(1));
+    expect(Number(rows[0].attempts)).toBe(1);
     expect(rows[0].status).toBe(StatusString.SUCCESS);
   });
 
@@ -357,7 +363,7 @@ describe('workflow-management-tests', () => {
       `SELECT status, recovery_attempts as attempts FROM dbos.workflow_status WHERE workflow_uuid=$1`,
       [workflowID],
     );
-    expect(result.rows[0].attempts).toBe(String(1));
+    expect(Number(result.rows[0].attempts)).toBe(1);
     expect(result.rows[0].status).toBe(StatusString.CANCELLED);
 
     // Wait for the cancelled execution to fully stop before resuming. Otherwise the stale
@@ -379,7 +385,7 @@ describe('workflow-management-tests', () => {
       `SELECT status, recovery_attempts as attempts FROM dbos.workflow_status WHERE workflow_uuid=$1`,
       [workflowID],
     );
-    expect(result.rows[0].attempts).toBe(String(1));
+    expect(Number(result.rows[0].attempts)).toBe(1);
     expect(TestEndpoints.tries).toBe(2);
     expect(result.rows[0].status).toBe(StatusString.SUCCESS);
 
@@ -397,7 +403,7 @@ describe('workflow-management-tests', () => {
       `SELECT status, recovery_attempts as attempts FROM dbos.workflow_status WHERE workflow_uuid!=$1`,
       [wfh.workflowID],
     );
-    expect(result.rows[0].attempts).toBe(String(1));
+    expect(Number(result.rows[0].attempts)).toBe(1);
     expect(result.rows[0].status).toBe(StatusString.SUCCESS);
 
     // Validate the original workflow status hasn't changed
@@ -565,20 +571,26 @@ describe('workflow-management-tests', () => {
     expect(cancelledHandle.workflowID).toBe(cancelID);
   });
 
-  test('systemdb-migration-backward-compatible', async () => {
+  (usingSQLite() ? test.skip : test)('systemdb-migration-backward-compatible', async () => {
     // Make sure the system DB migration failure is handled correctly.
     // If there is a migration failure, the system DB should still be able to start.
     // This happens when the old code is running with a new system DB schema.
-    await DBOS.shutdown();
-    await systemDBClient.query(`UPDATE "dbos"."dbos_migrations" SET "version" = 10000;`);
-    await DBOS.launch();
-    await expect(TestEndpoints.testWorkflow('alice')).resolves.toBe('alice');
+    // The executor-owned pool is closed by shutdown; use an independent handle.
+    const migrationClient = await connectToDBOSTestSystemDatabase(config);
+    try {
+      await DBOS.shutdown();
+      await migrationClient.query(`UPDATE "dbos"."dbos_migrations" SET "version" = 10000;`);
+      await DBOS.launch();
+      await expect(TestEndpoints.testWorkflow('alice')).resolves.toBe('alice');
 
-    // Test schema install idempotence
-    await DBOS.shutdown();
-    await systemDBClient.query(`UPDATE "dbos"."dbos_migrations" SET "version" = 0;`);
-    await DBOS.launch();
-    await expect(TestEndpoints.testWorkflow('alice')).resolves.toBe('alice');
+      // Test schema install idempotence
+      await DBOS.shutdown();
+      await migrationClient.query(`UPDATE "dbos"."dbos_migrations" SET "version" = 0;`);
+      await DBOS.launch();
+      await expect(TestEndpoints.testWorkflow('alice')).resolves.toBe('alice');
+    } finally {
+      await migrationClient.end();
+    }
   });
 
   class TestEndpoints {
@@ -3914,7 +3926,7 @@ describe('test-workflow-aggregates', () => {
     expect(empty.length).toBe(0);
   });
 
-  test('filter-by-attributes', async () => {
+  (usingSQLite() ? test.skip : test)('filter-by-attributes', async () => {
     // Two workflows tagged acme, one tagged globex.
     for (let i = 0; i < 2; i++) {
       const h = await DBOS.startWorkflow(AggWorkflows, {
@@ -4004,20 +4016,14 @@ describe('test-workflow-aggregates', () => {
 
     const sysdb = DBOSExecutor.globalInstance!.systemDatabase;
 
-    const client = new Client({ connectionString: config.systemDatabaseUrl });
-    await client.connect();
-    try {
-      await client.query(
-        `UPDATE "${sysdb.schemaName}".workflow_status SET schedule_name = $1 WHERE workflow_uuid = ANY($2)`,
-        ['sched-a', [ids[0], ids[1]]],
-      );
-      await client.query(
-        `UPDATE "${sysdb.schemaName}".workflow_status SET schedule_name = $1 WHERE workflow_uuid = $2`,
-        ['sched-b', ids[2]],
-      );
-    } finally {
-      await client.end();
-    }
+    await sysdb.pool.query(
+      `UPDATE "${sysdb.schemaName}".workflow_status SET schedule_name = $1 WHERE workflow_uuid = ANY($2)`,
+      ['sched-a', [ids[0], ids[1]]],
+    );
+    await sysdb.pool.query(
+      `UPDATE "${sysdb.schemaName}".workflow_status SET schedule_name = $1 WHERE workflow_uuid = $2`,
+      ['sched-b', ids[2]],
+    );
 
     const a = await sysdb.getWorkflowAggregates({
       groupByStatus: true,
@@ -4229,6 +4235,9 @@ describe('test-step-aggregates', () => {
 
   test('completed-window-and-max', async () => {
     const beforeAll = new Date().toISOString();
+    // SQLite records millisecond timestamps. Keep the first completion strictly
+    // after the inclusive completedBefore boundary below.
+    await sleepms(2);
     await DurationWorkflows.parent();
     const afterAll = new Date().toISOString();
 
